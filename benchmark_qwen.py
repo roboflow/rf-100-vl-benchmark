@@ -4,10 +4,8 @@ import glob
 import base64
 import numpy as np
 import cv2
-from pathlib import Path
 from PIL import Image
 import time
-from datetime import datetime
 from openai import OpenAI
 from qwen_vl_utils import smart_resize
 import supervision as sv
@@ -26,8 +24,8 @@ MAX_PIXELS = 2048*28*28
 SYSTEM_PROMPT = "You are a helpful assistant."
 OUTPUT_DIR = "qwen_detection_results"
 VISUALIZE_DIR = "qwen_visualized_predictions"
-MAX_WORKERS = 16  # Maximum number of parallel workers for image processing
-REQUEST_LIMIT = 120  # Maximum number of API requests per minute (adjust based on API limits)
+MAX_WORKERS = 8  # Maximum number of parallel workers for image processing
+REQUEST_LIMIT = 100  # Maximum number of API requests per minute (adjust based on API limits)
 
 # Thread-safe rate limiter for API requests
 class RateLimiter:
@@ -297,6 +295,7 @@ def process_image(args):
         # Smart resize for API
         input_height, input_width = smart_resize(height, width, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS)
         
+        print("Prompt: ", prompt)
         # Run inference
         response = inference_with_api(image_path, prompt)
         
@@ -322,6 +321,12 @@ def process_image(args):
         return None, f"Error processing {file_name}: {e}"
 
 def process_dataset(dataset_dir):
+    #first test if qwen_detection_results exists
+    results_dir = os.path.join(OUTPUT_DIR, os.path.basename(dataset_dir))
+    if os.path.exists(results_dir):
+        print(f"Results already exist for {dataset_dir}. Skipping...")
+        return
+
     """Process a single dataset"""
     test_folder = os.path.join(dataset_dir, "test")
     if not os.path.exists(test_folder):
@@ -348,9 +353,8 @@ def process_dataset(dataset_dir):
     # Get all images
     images = annotations.get("images", [])
     
-    # Create prompt with all category names
     category_prompt = ", ".join(category_names)
-    prompt = f"Outline the position of each {category_prompt} and output all the coordinates in JSON format."
+    prompt = f"Outline the position of each of the following objects: {category_prompt}, and output all the coordinates in JSON format."
     
     # Prepare results
     dataset_name = os.path.basename(dataset_dir)
