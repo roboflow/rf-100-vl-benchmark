@@ -8,7 +8,7 @@ import logging
 import argparse
 import pickle
 import copy
-from qwen_vl_utils import smart_resize
+from qwen_vl_utils import smart_resize #expects qwen-vl-utils==0.0.8
 from utils.qwen_eval_utils import *
 from utils.shared_eval_utils import *
 
@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_KEY = os.getenv('DASHSCOPE_API_KEY')
+API_KEY = "sk-3b2f44831cef43578534c5cbe8ecedd3" #os.getenv('DASHSCOPE_API_KEY')
 
 rate_limiter = RateLimiter(REQUEST_LIMIT)
 
@@ -392,7 +392,8 @@ def process_image(args):
                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image_test}"} # Assuming JPEG
                 },
                 {"type": "text", "text": final_query_text},
-            ]
+            ],
+            "temperature": 0.0
         }
         final_messages.append(final_user_message)
 
