@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Official RF100-VL download locations
+/rf100-vl/
+/RF100VL/
+/RF100-VL/
+
+# Cosmos smoke tests and full benchmark outputs
+/cosmos-smoke/
+/cosmos-rf100-results/
+/cosmos-rf100-results-*/
+/results_Cosmos3-Edge_basic/
