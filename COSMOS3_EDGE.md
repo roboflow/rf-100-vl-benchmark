@@ -85,8 +85,48 @@ For the conservative, most reproducible complete benchmark:
 python evaluate_cosmos.py \
   --dataset-dir /absolute/path/to/rf100-vl \
   --workers 1 \
+  --expected-datasets 100 \
   --save-dir ./cosmos-rf100-results
 ```
+
+## Durable GCS results and resume
+
+For an ephemeral GPU machine, give the run its own GCS prefix. The evaluator
+verifies create/read/list access before inference, restores existing artifacts
+from that exact prefix, uploads every successful image record immediately, and
+refreshes errors, per-dataset outputs, aggregate scores, and the log as the run
+progresses:
+
+```bash
+export COSMOS_GCS_RESULTS_URI="gs://YOUR_BUCKET/rf100vl/cosmos3-edge/YOUR_RUN_ID"
+
+python evaluate_cosmos.py \
+  --dataset-dir /absolute/path/to/rf100-vl \
+  --workers 1 \
+  --expected-datasets 100 \
+  --save-dir ./cosmos-rf100-results \
+  --gcs-results-uri "${COSMOS_GCS_RESULTS_URI}"
+```
+
+The Python client uses Google Application Default Credentials (ADC). On the
+existing RunPod account, reuse the account-level `GCP_SA_JSON_B64` secret:
+inject it into the container, decode it to a mode-600 temporary JSON file, and
+set `GOOGLE_APPLICATION_CREDENTIALS` to that file before starting the evaluator.
+Do not put the JSON, its base64 value, or a signed URL in Git, the image, or the
+launch command. A replacement pod resumes by using the same GCS results URI.
+
+Resume requires create, read, update, and list access to objects below the run
+prefix. At bucket scope, `roles/storage.objectUser` provides those object
+operations without granting bucket administration. `roles/storage.objectCreator`
+alone is insufficient because it cannot list or read checkpoints.
+
+The root `aggregate_summary.json` is refreshed after every dataset. A root
+`_SUCCESS.json` is written only when every selected dataset completed and was
+scored. For the canonical run, the combination of `--expected-datasets 100`, a
+zero process exit, `scored_dataset_count: 100`, and `_SUCCESS.json` verifies that
+all 100 test splits were scored before the pod is terminated. If a GCS operation
+fails, the evaluator stops instead of continuing to spend GPU time without
+durable checkpoints.
 
 vLLM can serve concurrent requests, but online scheduling is not guaranteed to
 be bitwise invariant. Before increasing `--workers`, compare a fixed smoke set

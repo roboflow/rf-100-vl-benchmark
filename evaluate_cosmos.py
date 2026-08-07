@@ -31,7 +31,7 @@ import statistics
 import threading
 import time
 from typing import Any, Iterable, Sequence
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 MODEL_ID = "nvidia/Cosmos3-Edge"
@@ -44,6 +44,155 @@ LOGGER = logging.getLogger("rf100_cosmos")
 
 class CosmosResponseError(ValueError):
     """Raised when a Cosmos response cannot be used as a detection result."""
+
+
+class GCSArtifactError(RuntimeError):
+    """Raised when durable GCS checkpointing cannot be completed."""
+
+
+def parse_gcs_uri(uri: str) -> tuple[str, str]:
+    """Return the bucket and object prefix for an exact gs:// artifact root."""
+
+    parsed = urlparse(uri)
+    if parsed.scheme != "gs" or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError(
+            "--gcs-results-uri must be an exact gs://bucket/prefix URI."
+        )
+    prefix = parsed.path.strip("/")
+    if not prefix:
+        raise ValueError(
+            "--gcs-results-uri must include a run-specific prefix below the bucket."
+        )
+    if any(part in ("", ".", "..") for part in PurePosixPath(prefix).parts):
+        raise ValueError("--gcs-results-uri contains an unsafe object prefix.")
+    return parsed.netloc, prefix
+
+
+class GCSArtifactStore:
+    """Mirror benchmark artifacts to one GCS run prefix using ADC."""
+
+    def __init__(self, uri: str):
+        self.uri = uri.rstrip("/")
+        self.bucket_name, self.prefix = parse_gcs_uri(self.uri)
+        try:
+            from google.cloud import storage
+        except ImportError as error:
+            raise GCSArtifactError(
+                "google-cloud-storage is required with --gcs-results-uri. "
+                "Install requirements-cosmos.txt."
+            ) from error
+        try:
+            self.client = storage.Client()
+            self.bucket = self.client.bucket(self.bucket_name)
+        except Exception as error:
+            raise GCSArtifactError(f"Could not initialize GCS ADC: {error}") from error
+
+    @staticmethod
+    def _relative_name(relative_path: str | PurePosixPath) -> str:
+        path = PurePosixPath(relative_path)
+        if path.is_absolute() or not path.parts or any(
+            part in ("", ".", "..") for part in path.parts
+        ):
+            raise ValueError(f"Unsafe artifact path: {relative_path!s}")
+        return path.as_posix()
+
+    def _object_name(self, relative_path: str | PurePosixPath) -> str:
+        return f"{self.prefix}/{self._relative_name(relative_path)}"
+
+    def verify_access(self) -> None:
+        """Verify create/read/list access without exposing any credential material."""
+
+        probe_name = self._object_name("run_access_probe.json")
+        probe = self.bucket.blob(probe_name)
+        payload = json.dumps(
+            {
+                "schema_version": 1,
+                "purpose": "Cosmos3-Edge RF100-VL artifact access check",
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        try:
+            probe.upload_from_string(payload, content_type="application/json")
+            if probe.download_as_bytes() != payload:
+                raise GCSArtifactError("GCS access probe content did not round-trip.")
+            # Resume requires object listing in addition to create/read access.
+            next(
+                iter(
+                    self.client.list_blobs(
+                        self.bucket_name,
+                        prefix=f"{self.prefix}/",
+                        max_results=1,
+                    )
+                ),
+                None,
+            )
+        except GCSArtifactError:
+            raise
+        except Exception as error:
+            raise GCSArtifactError(
+                f"GCS create/read/list verification failed for {self.uri}: {error}"
+            ) from error
+
+    def upload_file(
+        self, local_path: Path, relative_path: str | PurePosixPath
+    ) -> None:
+        object_name = self._object_name(relative_path)
+        try:
+            self.bucket.blob(object_name).upload_from_filename(str(local_path))
+        except Exception as error:
+            raise GCSArtifactError(
+                f"Could not upload {local_path} to gs://{self.bucket_name}/{object_name}: {error}"
+            ) from error
+
+    def delete_if_exists(self, relative_path: str | PurePosixPath) -> None:
+        """Invalidate a small status marker while preserving all checkpoints."""
+
+        object_name = self._object_name(relative_path)
+        try:
+            blob = self.bucket.blob(object_name)
+            if blob.exists(client=self.client):
+                blob.delete()
+        except Exception as error:
+            raise GCSArtifactError(
+                f"Could not invalidate gs://{self.bucket_name}/{object_name}: {error}"
+            ) from error
+
+    def restore_prefix(
+        self, relative_prefix: str | PurePosixPath, destination: Path
+    ) -> int:
+        """Download an artifact subtree, returning the restored object count."""
+
+        object_prefix = self._object_name(relative_prefix).rstrip("/") + "/"
+        restored = 0
+        try:
+            blobs = self.client.list_blobs(
+                self.bucket_name,
+                prefix=object_prefix,
+            )
+            for blob in blobs:
+                suffix = blob.name[len(object_prefix) :]
+                if not suffix:
+                    continue
+                suffix_path = PurePosixPath(suffix)
+                if suffix_path.is_absolute() or ".." in suffix_path.parts:
+                    raise GCSArtifactError(
+                        f"Unsafe object below resume prefix: {blob.name}"
+                    )
+                local_path = destination.joinpath(*suffix_path.parts)
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = local_path.with_name(
+                    f".{local_path.name}.{os.getpid()}.gcs.tmp"
+                )
+                blob.download_to_filename(str(temporary))
+                os.replace(temporary, local_path)
+                restored += 1
+        except GCSArtifactError:
+            raise
+        except Exception as error:
+            raise GCSArtifactError(
+                f"Could not restore gs://{self.bucket_name}/{object_prefix}: {error}"
+            ) from error
+        return restored
 
 
 def normalize_label(value: str) -> str:
@@ -240,6 +389,28 @@ def atomic_write_json(path: Path, value: Any) -> None:
         json.dump(value, file, indent=2, ensure_ascii=False)
         file.write("\n")
     os.replace(temporary, path)
+
+
+def artifact_relative_path(path: Path, output_root: Path) -> PurePosixPath:
+    """Map one local result path to its stable path below the GCS run root."""
+
+    relative = path.resolve().relative_to(output_root.resolve())
+    return PurePosixPath(relative.as_posix())
+
+
+def upload_artifact(
+    artifact_store: GCSArtifactStore | None,
+    path: Path,
+    output_root: Path,
+) -> None:
+    if artifact_store is not None:
+        artifact_store.upload_file(path, artifact_relative_path(path, output_root))
+
+
+def flush_log_handlers() -> None:
+    for handler in LOGGER.handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()
 
 
 def sha256_file(path: Path) -> str:
@@ -670,6 +841,7 @@ def run_dataset(
     inference_client: CosmosInferenceClient,
     run_config: dict[str, Any],
     args: argparse.Namespace,
+    artifact_store: GCSArtifactStore | None = None,
 ) -> dict[str, Any]:
     dataset_name = dataset_directory.name
     test_directory = dataset_directory / "test"
@@ -692,13 +864,25 @@ def run_dataset(
         json.dumps(run_config, sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
     result_directory = output_root / dataset_name
+    if artifact_store is not None:
+        restored_count = artifact_store.restore_prefix(
+            PurePosixPath(dataset_name), result_directory
+        )
+        if restored_count:
+            LOGGER.info(
+                "%s: restored %d artifact(s) from %s",
+                dataset_name,
+                restored_count,
+                artifact_store.uri,
+            )
     record_directory = (
         result_directory / "records" / f"{run_hash}-{annotation_hash[:12]}"
     )
     visualization_directory = result_directory / "visualizations"
     record_directory.mkdir(parents=True, exist_ok=True)
+    run_config_path = result_directory / f"run_config_{run_hash}.json"
     atomic_write_json(
-        result_directory / f"run_config_{run_hash}.json",
+        run_config_path,
         {
             **run_config,
             "annotation_path": str(annotation_path),
@@ -707,6 +891,7 @@ def run_dataset(
             "prompt": prompt,
         },
     )
+    upload_artifact(artifact_store, run_config_path, output_root)
 
     records = load_records(record_directory)
     known_image_ids = {image["id"] for image in images}
@@ -762,9 +947,11 @@ def run_dataset(
                 result = future.result()
                 image_id = result["image_id"]
                 if result["status"] == "success":
-                    atomic_write_json(
-                        record_directory / _image_record_name(image_id), result
-                    )
+                    record_path = record_directory / _image_record_name(image_id)
+                    atomic_write_json(record_path, result)
+                    # A completed inference is not considered durable until its
+                    # raw response and converted predictions reach GCS.
+                    upload_artifact(artifact_store, record_path, output_root)
                     records[image_id] = result
                     ignored = result["diagnostics"].get("ignored_labels", [])
                     if ignored:
@@ -776,9 +963,9 @@ def run_dataset(
                         )
                 else:
                     errors.append(result)
-                    append_json_line(
-                        result_directory / f"errors_{run_hash}.jsonl", result
-                    )
+                    errors_path = result_directory / f"errors_{run_hash}.jsonl"
+                    append_json_line(errors_path, result)
+                    upload_artifact(artifact_store, errors_path, output_root)
                     LOGGER.error(
                         "%s/%s failed: %s",
                         dataset_name,
@@ -802,6 +989,9 @@ def run_dataset(
                 categories_by_id,
                 output_path,
             )
+            upload_artifact(artifact_store, output_path, output_root)
+        except GCSArtifactError:
+            raise
         except Exception as error:
             LOGGER.warning(
                 "%s/%s visualization failed: %s",
@@ -817,6 +1007,7 @@ def run_dataset(
             predictions.extend(record.get("predictions", []))
     predictions_path = result_directory / "cosmos_detection_results.json"
     atomic_write_json(predictions_path, predictions)
+    upload_artifact(artifact_store, predictions_path, output_root)
 
     completed_image_count = sum(image["id"] in records for image in images)
     complete = completed_image_count == len(images)
@@ -845,7 +1036,9 @@ def run_dataset(
         )
         LOGGER.warning("%s: %s", dataset_name, result["score_skipped_reason"])
 
-    atomic_write_json(result_directory / "summary.json", result)
+    summary_path = result_directory / "summary.json"
+    atomic_write_json(summary_path, result)
+    upload_artifact(artifact_store, summary_path, output_root)
     return result
 
 
@@ -925,6 +1118,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Output root. Defaults to results_Cosmos3-Edge_basic.",
     )
+    parser.add_argument(
+        "--gcs-results-uri",
+        default=os.getenv("COSMOS_GCS_RESULTS_URI"),
+        help=(
+            "Optional run-specific gs://bucket/prefix. Existing artifacts are "
+            "restored and every new checkpoint/result is uploaded using ADC."
+        ),
+    )
+    parser.add_argument(
+        "--expected-datasets",
+        type=int,
+        default=None,
+        help="Fail before inference unless exactly this many datasets are selected.",
+    )
     parser.add_argument("--visualize-limit", type=int, default=0)
     parser.add_argument("--skip-scoring", action="store_true")
     args = parser.parse_args(argv)
@@ -932,7 +1139,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     for name in ("workers", "max_tokens", "retries"):
         if getattr(args, name) < (0 if name == "retries" else 1):
             parser.error(f"--{name.replace('_', '-')} has an invalid value.")
-    for name in ("max_datasets", "max_images"):
+    for name in ("max_datasets", "max_images", "expected_datasets"):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
@@ -940,6 +1147,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--visualize-limit cannot be negative.")
     if args.image_transport == "file-url" and not args.server_media_root:
         parser.error("--server-media-root is required with file-url transport.")
+    if args.gcs_results_uri:
+        try:
+            parse_gcs_uri(args.gcs_results_uri)
+        except ValueError as error:
+            parser.error(str(error))
     return args
 
 
@@ -951,6 +1163,56 @@ def configure_logging(log_path: Path) -> None:
         handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
         force=True,
     )
+
+
+def build_aggregate_summary(
+    args: argparse.Namespace,
+    summaries: Sequence[dict[str, Any]],
+    selected_dataset_count: int,
+    status: str,
+) -> dict[str, Any]:
+    scored = [summary for summary in summaries if "metrics" in summary]
+    aggregate: dict[str, Any] = {
+        "model_id": args.model_id,
+        "prompt_version": PROMPT_VERSION,
+        "status": status,
+        "selected_dataset_count": selected_dataset_count,
+        "processed_dataset_count": len(summaries),
+        # Retain the original field for existing result consumers.
+        "dataset_count": len(summaries),
+        "scored_dataset_count": len(scored),
+        "expected_dataset_count": args.expected_datasets,
+        "datasets": list(summaries),
+    }
+    if scored:
+        aggregate["macro_AP"] = statistics.fmean(
+            summary["metrics"]["AP"] for summary in scored
+        )
+        aggregate["macro_AP50"] = statistics.fmean(
+            summary["metrics"]["AP50"] for summary in scored
+        )
+    return aggregate
+
+
+def persist_aggregate(
+    args: argparse.Namespace,
+    summaries: Sequence[dict[str, Any]],
+    selected_dataset_count: int,
+    status: str,
+    output_root: Path,
+    artifact_store: GCSArtifactStore | None,
+) -> dict[str, Any]:
+    aggregate = build_aggregate_summary(
+        args, summaries, selected_dataset_count, status
+    )
+    aggregate_path = output_root / "aggregate_summary.json"
+    atomic_write_json(aggregate_path, aggregate)
+    upload_artifact(artifact_store, aggregate_path, output_root)
+    flush_log_handlers()
+    log_path = output_root / "cosmos_detection.log"
+    if log_path.is_file():
+        upload_artifact(artifact_store, log_path, output_root)
+    return aggregate
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -972,6 +1234,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         dataset_directories = dataset_directories[: args.max_datasets]
     if not dataset_directories:
         raise FileNotFoundError(f"No RF100-VL datasets found below {dataset_root}.")
+    if (
+        args.expected_datasets is not None
+        and len(dataset_directories) != args.expected_datasets
+    ):
+        raise ValueError(
+            f"Expected exactly {args.expected_datasets} selected datasets, found "
+            f"{len(dataset_directories)}. No inference was started."
+        )
+
+    artifact_store = (
+        GCSArtifactStore(args.gcs_results_uri) if args.gcs_results_uri else None
+    )
+    success_path = output_root / "_SUCCESS.json"
+    success_path.unlink(missing_ok=True)
+    if artifact_store is not None:
+        artifact_store.verify_access()
+        artifact_store.delete_if_exists("_SUCCESS.json")
+        LOGGER.info("Durable GCS artifacts enabled at %s", artifact_store.uri)
 
     LOGGER.info(
         "Found %d dataset(s); model=%s", len(dataset_directories), args.model_id
@@ -982,6 +1262,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_config = build_run_config(args)
     inference_client = CosmosInferenceClient(args)
     summaries: list[dict[str, Any]] = []
+    persist_aggregate(
+        args,
+        summaries,
+        len(dataset_directories),
+        "running",
+        output_root,
+        artifact_store,
+    )
     for index, dataset_directory in enumerate(dataset_directories, start=1):
         LOGGER.info(
             "Dataset %d/%d: %s", index, len(dataset_directories), dataset_directory.name
@@ -995,6 +1283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     inference_client,
                     run_config,
                     args,
+                    artifact_store,
                 )
             )
         except Exception as error:
@@ -1005,29 +1294,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "fatal_error": f"{type(error).__name__}: {error}",
                 }
             )
-
-    scored = [summary for summary in summaries if "metrics" in summary]
-    aggregate: dict[str, Any] = {
-        "model_id": args.model_id,
-        "prompt_version": PROMPT_VERSION,
-        "dataset_count": len(summaries),
-        "scored_dataset_count": len(scored),
-        "datasets": summaries,
-    }
-    if scored:
-        aggregate["macro_AP"] = statistics.fmean(
-            summary["metrics"]["AP"] for summary in scored
+            # GCS is the durability boundary. Continuing after it fails would
+            # spend GPU time while silently losing resumable progress.
+            if isinstance(error, GCSArtifactError):
+                persist_aggregate(
+                    args,
+                    summaries,
+                    len(dataset_directories),
+                    "failed",
+                    output_root,
+                    None,
+                )
+                LOGGER.error("Stopping immediately because durable GCS sync failed.")
+                return 1
+        persist_aggregate(
+            args,
+            summaries,
+            len(dataset_directories),
+            "running",
+            output_root,
+            artifact_store,
         )
-        aggregate["macro_AP50"] = statistics.fmean(
-            summary["metrics"]["AP50"] for summary in scored
-        )
-        LOGGER.info(
-            "Macro AP=%.4f, macro AP50=%.4f across %d datasets",
-            aggregate["macro_AP"],
-            aggregate["macro_AP50"],
-            len(scored),
-        )
-    atomic_write_json(output_root / "aggregate_summary.json", aggregate)
 
     fatal_count = sum("fatal_error" in summary for summary in summaries)
     image_error_count = sum(summary.get("new_error_count", 0) for summary in summaries)
@@ -1037,19 +1324,78 @@ def main(argv: Sequence[str] | None = None) -> int:
         if "fatal_error" not in summary
     )
     unexpected_incomplete_count = incomplete_count if args.max_images is None else 0
-    if fatal_count or image_error_count or unexpected_incomplete_count:
+    unprocessed_count = len(dataset_directories) - len(summaries)
+    failed = bool(
+        fatal_count
+        or image_error_count
+        or unexpected_incomplete_count
+        or unprocessed_count
+    )
+    final_status = "failed" if failed else ("partial" if incomplete_count else "complete")
+    aggregate = persist_aggregate(
+        args,
+        summaries,
+        len(dataset_directories),
+        final_status,
+        output_root,
+        artifact_store,
+    )
+    scored = [summary for summary in summaries if "metrics" in summary]
+    if scored:
+        LOGGER.info(
+            "Macro AP=%.4f, macro AP50=%.4f across %d datasets",
+            aggregate["macro_AP"],
+            aggregate["macro_AP50"],
+            len(scored),
+        )
+
+    fully_scored = (
+        not failed
+        and not incomplete_count
+        and not args.skip_scoring
+        and len(scored) == len(dataset_directories)
+    )
+    if fully_scored:
+        atomic_write_json(
+            success_path,
+            {
+                "schema_version": 1,
+                "model_id": args.model_id,
+                "prompt_version": PROMPT_VERSION,
+                "scored_dataset_count": len(scored),
+                "expected_dataset_count": args.expected_datasets,
+                "macro_AP": aggregate.get("macro_AP"),
+                "macro_AP50": aggregate.get("macro_AP50"),
+            },
+        )
+        upload_artifact(artifact_store, success_path, output_root)
+        flush_log_handlers()
+        upload_artifact(
+            artifact_store, output_root / "cosmos_detection.log", output_root
+        )
+
+    if failed:
         LOGGER.error(
             "Run finished with %d fatal dataset error(s), %d image error(s), "
-            "and %d unexpectedly incomplete dataset(s).",
+            "%d unexpectedly incomplete dataset(s), and %d unprocessed dataset(s).",
             fatal_count,
             image_error_count,
             unexpected_incomplete_count,
+            unprocessed_count,
+        )
+        flush_log_handlers()
+        upload_artifact(
+            artifact_store, output_root / "cosmos_detection.log", output_root
         )
         return 1
     if incomplete_count:
         LOGGER.info(
             "Smoke run completed successfully; %d dataset(s) are intentionally partial.",
             incomplete_count,
+        )
+        flush_log_handlers()
+        upload_artifact(
+            artifact_store, output_root / "cosmos_detection.log", output_root
         )
     return 0
 

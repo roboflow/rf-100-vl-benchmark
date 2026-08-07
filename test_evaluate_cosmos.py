@@ -2,9 +2,11 @@ import json
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from evaluate_cosmos import (
     CosmosResponseError,
@@ -12,6 +14,7 @@ from evaluate_cosmos import (
     convert_detections_to_coco,
     main,
     parse_cosmos_response,
+    parse_gcs_uri,
     score_coco,
 )
 
@@ -22,6 +25,17 @@ class CosmosPromptTests(unittest.TestCase):
         self.assertIn(json.dumps(["red fox", 'class "quoted"']), prompt)
         self.assertIn("return []", prompt)
         self.assertIn("0–1000", prompt)
+
+
+class GCSConfigurationTests(unittest.TestCase):
+    def test_requires_bucket_and_run_specific_prefix(self):
+        self.assertEqual(
+            parse_gcs_uri("gs://benchmark-artifacts/cosmos/run-1"),
+            ("benchmark-artifacts", "cosmos/run-1"),
+        )
+        for invalid in ("https://bucket/run", "gs://bucket", "gs:///run"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_gcs_uri(invalid)
 
 
 class CosmosParserTests(unittest.TestCase):
@@ -114,6 +128,40 @@ class _MockCosmosHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _DirectoryArtifactStore:
+    """Test double that treats a local directory as an exact GCS run root."""
+
+    root: Path
+
+    def __init__(self, uri: str):
+        self.uri = uri
+
+    def verify_access(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def upload_file(self, local_path: Path, relative_path):
+        destination = self.root.joinpath(*Path(str(relative_path)).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_path, destination)
+
+    def delete_if_exists(self, relative_path):
+        self.root.joinpath(*Path(str(relative_path)).parts).unlink(missing_ok=True)
+
+    def restore_prefix(self, relative_prefix, destination: Path):
+        source = self.root.joinpath(*Path(str(relative_prefix)).parts)
+        if not source.is_dir():
+            return 0
+        count = 0
+        for path in source.rglob("*"):
+            if not path.is_file():
+                continue
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            count += 1
+        return count
+
+
 class CosmosEndToEndTests(unittest.TestCase):
     def test_cli_inference_scoring_and_resume(self):
         try:
@@ -164,6 +212,7 @@ class CosmosEndToEndTests(unittest.TestCase):
                 annotation_path = test_directory / "_annotations.coco.json"
                 annotation_path.write_text(json.dumps(annotations), encoding="utf-8")
                 output = root / "output"
+                _DirectoryArtifactStore.root = root / "remote-artifacts"
                 argv = [
                     "--dataset-dir",
                     str(root / "rf100"),
@@ -175,9 +224,14 @@ class CosmosEndToEndTests(unittest.TestCase):
                     "0",
                     "--save-dir",
                     str(output),
+                    "--gcs-results-uri",
+                    "gs://benchmark-artifacts/cosmos/test-run",
                 ]
 
-                self.assertEqual(main([*argv, "--max-images", "1"]), 0)
+                with mock.patch(
+                    "evaluate_cosmos.GCSArtifactStore", _DirectoryArtifactStore
+                ):
+                    self.assertEqual(main([*argv, "--max-images", "1"]), 0)
                 partial_summary = json.loads(
                     (output / "toy-dataset" / "summary.json").read_text(
                         encoding="utf-8"
@@ -185,9 +239,21 @@ class CosmosEndToEndTests(unittest.TestCase):
                 )
                 self.assertFalse(partial_summary["complete"])
                 self.assertNotIn("metrics", partial_summary)
+                remote_records = list(
+                    (_DirectoryArtifactStore.root / "toy-dataset" / "records").rglob(
+                        "*.json"
+                    )
+                )
+                self.assertEqual(len(remote_records), 1)
 
-                self.assertEqual(main(argv), 0)
-                self.assertEqual(main(argv), 0)
+                # Simulate pod loss: only GCS remains, and the next pod restores
+                # the first raw response instead of repeating its inference.
+                shutil.rmtree(output)
+                with mock.patch(
+                    "evaluate_cosmos.GCSArtifactStore", _DirectoryArtifactStore
+                ):
+                    self.assertEqual(main(argv), 0)
+                    self.assertEqual(main(argv), 0)
                 self.assertEqual(len(_MockCosmosHandler.requests), 2)
 
                 request = _MockCosmosHandler.requests[0]
@@ -214,6 +280,7 @@ class CosmosEndToEndTests(unittest.TestCase):
                 self.assertEqual(predictions[0]["bbox"], [0.0, 0.0, 100.0, 100.0])
                 self.assertEqual(len(predictions), 2)
                 self.assertAlmostEqual(score_coco(annotation_path, [])["AP"], 0.0)
+                self.assertTrue((_DirectoryArtifactStore.root / "_SUCCESS.json").is_file())
         finally:
             server.shutdown()
             server.server_close()
