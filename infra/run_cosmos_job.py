@@ -562,7 +562,10 @@ def evaluator_command(
         gcs_uri,
     ]
     if dataset:
-        command.extend(["--dataset", dataset])
+        # RF100VL contains a dataset literally named "-grccs". Use argparse's
+        # --option=value form so a leading hyphen cannot be mistaken for a new
+        # command-line option.
+        command.append(f"--dataset={dataset}")
     if max_images is not None:
         command.extend(["--max-images", str(max_images)])
     if visualize_limit:

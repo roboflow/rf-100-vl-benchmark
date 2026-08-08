@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "infra"))
 
 from gcs_io import parse_uri
 import download_rf100vl
+from evaluate_cosmos import parse_args as parse_evaluator_args
 from run_cosmos_job import (
     DatasetAcquisition,
     GPU_MEMORY_UTILIZATION,
@@ -124,6 +125,21 @@ class JobContractTests(unittest.TestCase):
         self.assertEqual(command[command.index("--preflight-report") + 1], "/report.json")
         self.assertNotIn("--max-images", command)
         self.assertNotIn("--enable-thinking", command)
+
+    def test_leading_hyphen_dataset_name_is_passed_unambiguously(self):
+        with mock.patch.dict(os.environ, contract_environment(), clear=True):
+            contract = JobContract.from_environment()
+        command = evaluator_command(
+            contract,
+            Path("/data"),
+            Path("/results"),
+            "gs://bucket/run/early-smoke",
+            dataset="-grccs",
+            max_images=1,
+        )
+        self.assertIn("--dataset=-grccs", command)
+        self.assertNotIn("--dataset", command)
+        self.assertEqual(parse_evaluator_args(command[2:]).datasets, ["-grccs"])
 
 
 class SmokeSelectionTests(unittest.TestCase):
