@@ -46,6 +46,13 @@ smaller values; these defaults leave substantial headroom over the roughly
 7 GB RF100VL download plus the model cache, extraction overhead, and result
 checkpoints.
 
+vLLM is explicitly limited to a 0.80 GPU-memory reservation. This prevents its
+KV cache from making a healthy server look out-of-memory in RunPod monitoring;
+it does not change BF16 weights or inference quality. The canonical request cap
+is 100,000 generated tokens within the pinned 131,072-token combined context,
+with sufficient reserved input capacity for the configured maximum-size image
+and RF100VL class prompt.
+
 ## Build the image
 
 Build only from a clean committed worktree. Set the already-authorized image

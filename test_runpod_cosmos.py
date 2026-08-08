@@ -16,9 +16,15 @@ sys.path.insert(0, str(ROOT / "infra"))
 from gcs_io import parse_uri
 import download_rf100vl
 from run_cosmos_job import (
+    GPU_MEMORY_UTILIZATION,
     JobContract,
+    MAX_IMAGE_PIXELS,
+    MAX_MODEL_LENGTH,
     PINNED_MODEL_REVISION,
+    VISION_PATCH_SIZE,
+    VISION_SPATIAL_MERGE_SIZE,
     evaluator_command,
+    ensure_dataset,
     select_smoke_dataset,
     vllm_command,
 )
@@ -39,6 +45,21 @@ def contract_environment(**overrides: str) -> dict[str, str]:
 
 
 class JobContractTests(unittest.TestCase):
+    def test_100k_output_budget_leaves_room_for_maximum_configured_image(self):
+        from evaluate_cosmos import CANONICAL_MAX_TOKENS
+
+        image_token_upper_bound = MAX_IMAGE_PIXELS // (
+            VISION_PATCH_SIZE * VISION_SPATIAL_MERGE_SIZE
+        ) ** 2
+        remaining_after_image = (
+            MAX_MODEL_LENGTH - CANONICAL_MAX_TOKENS - image_token_upper_bound
+        )
+        self.assertEqual(CANONICAL_MAX_TOKENS, 100_000)
+        self.assertEqual(image_token_upper_bound, 16_384)
+        # RF100VL class lists are far smaller; this reserve also covers chat
+        # template and vision boundary tokens without approaching the limit.
+        self.assertGreaterEqual(remaining_after_image, 14_000)
+
     def test_preflight_contract_pins_fair_inference_settings(self):
         with mock.patch.dict(os.environ, contract_environment(), clear=True):
             contract = JobContract.from_environment()
@@ -49,6 +70,10 @@ class JobContractTests(unittest.TestCase):
         self.assertEqual(command[command.index("--dtype") + 1], "bfloat16")
         self.assertEqual(command[command.index("--kv-cache-dtype") + 1], "auto")
         self.assertEqual(command[command.index("--seed") + 1], "0")
+        self.assertEqual(
+            command[command.index("--gpu-memory-utilization") + 1],
+            f"{GPU_MEMORY_UTILIZATION:.2f}",
+        )
         self.assertEqual(command[command.index("--revision") + 1], PINNED_MODEL_REVISION)
         self.assertFalse(any("quant" in value for value in command))
 
@@ -85,6 +110,8 @@ class JobContractTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--expected-datasets") + 1], "100")
         self.assertEqual(command[command.index("--workers") + 1], "1")
+        self.assertEqual(command[command.index("--max-tokens") + 1], "100000")
+        self.assertEqual(command[command.index("--timeout") + 1], "1800")
         self.assertEqual(command[command.index("--preflight-report") + 1], "/report.json")
         self.assertNotIn("--max-images", command)
         self.assertNotIn("--enable-thinking", command)
@@ -165,6 +192,60 @@ class PodCleanupTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods/pod-1")
         self.assertEqual(request.method, "DELETE")
+
+    def test_entrypoint_stops_preflight_and_failures_but_terminates_full_success(self):
+        cases = (
+            ("preflight", 0, "stop"),
+            ("preflight", 7, "stop"),
+            ("full", 0, "terminate"),
+            ("full", 7, "stop"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_python = root / "fake-python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [ \"${1:-}\" = \"infra/run_cosmos_job.py\" ]; then\n"
+                "  exit \"${FAKE_JOB_RC}\"\n"
+                "fi\n"
+                "if [ \"${1:-}\" = \"infra/runpod_self_terminate.py\" ]; then\n"
+                "  printf '%s\\n' \"$*\" >> \"${FAKE_ACTION_LOG}\"\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o700)
+            for stage, job_rc, expected_action in cases:
+                with self.subTest(stage=stage, job_rc=job_rc):
+                    action_log = root / f"{stage}-{job_rc}.log"
+                    environment = os.environ.copy()
+                    environment.update(
+                        {
+                            "COSMOS_BENCHMARK_ROOT": str(ROOT),
+                            "COSMOS_EVAL_PYTHON": str(fake_python),
+                            "COSMOS_WORK_DIR": str(root / f"work-{stage}-{job_rc}"),
+                            "COSMOS_STAGE": stage,
+                            "COSMOS_GCS_RUN_URI": "gs://bucket/run",
+                            "GOOGLE_APPLICATION_CREDENTIALS": str(root / "fake.json"),
+                            "RUNPOD_POD_ID": "pod-dummy",
+                            "RUNPOD_API_KEY": "dummy-key",
+                            "FAKE_JOB_RC": str(job_rc),
+                            "FAKE_ACTION_LOG": str(action_log),
+                        }
+                    )
+                    result = subprocess.run(
+                        ["bash", "infra/cosmos_runpod_entrypoint.sh"],
+                        cwd=ROOT,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, job_rc, result.stderr)
+                    self.assertEqual(
+                        action_log.read_text(encoding="utf-8").strip(),
+                        "infra/runpod_self_terminate.py pod-dummy "
+                        + expected_action,
+                    )
 
 
 class LauncherDryRunTests(unittest.TestCase):
@@ -267,6 +348,26 @@ class LauncherDryRunTests(unittest.TestCase):
 
 
 class RuntimeHelperTests(unittest.TestCase):
+    def test_complete_100_dataset_volume_is_reused_without_download(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset_root = Path(temporary) / "rf100-vl"
+            for index in range(100):
+                (dataset_root / f"dataset-{index:03d}" / "test").mkdir(
+                    parents=True
+                )
+            contract = types.SimpleNamespace(
+                requested_dataset_dir=dataset_root,
+                expected_datasets=100,
+                dataset_gcs_uri=None,
+            )
+            with (
+                mock.patch("run_cosmos_job.run_command") as run_command,
+                mock.patch("run_cosmos_job.download_prefix") as download_prefix,
+            ):
+                self.assertEqual(ensure_dataset(contract), dataset_root)
+            run_command.assert_not_called()
+            download_prefix.assert_not_called()
+
     def test_downloader_uses_package_api_and_canonical_coco_format(self):
         calls = []
 

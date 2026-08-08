@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /benchmark
+cd "${COSMOS_BENCHMARK_ROOT:-/benchmark}"
 
 WORK_DIR=${COSMOS_WORK_DIR:-/workspace/cosmos-runpod-work}
 EVAL_PYTHON=${COSMOS_EVAL_PYTHON:-/opt/cosmos-eval/bin/python}

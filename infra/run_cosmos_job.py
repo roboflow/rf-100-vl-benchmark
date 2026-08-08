@@ -23,6 +23,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "infra"))
 
 from evaluate_cosmos import (  # noqa: E402
+    CANONICAL_MAX_TOKENS,
+    CANONICAL_TIMEOUT_SECONDS,
     GCSArtifactStore,
     MODEL_ID,
     PROMPT_VERSION,
@@ -37,6 +39,11 @@ from gcs_io import download, download_prefix, exists  # noqa: E402
 
 PINNED_MODEL_REVISION = "2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2"
 BASE_URL = "http://127.0.0.1:8000/v1"
+GPU_MEMORY_UTILIZATION = 0.80
+MAX_MODEL_LENGTH = 131_072
+MAX_IMAGE_PIXELS = 16_777_216
+VISION_PATCH_SIZE = 16
+VISION_SPATIAL_MERGE_SIZE = 2
 
 
 def utc_now() -> str:
@@ -153,11 +160,13 @@ def vllm_command(contract: JobContract) -> list[str]:
         "--seed",
         "0",
         "--max-model-len",
-        "131072",
+        str(MAX_MODEL_LENGTH),
+        "--gpu-memory-utilization",
+        f"{GPU_MEMORY_UTILIZATION:.2f}",
         "--allowed-local-media-path",
         "/",
         "--mm-processor-kwargs",
-        '{"do_resize":true,"min_pixels":4096,"max_pixels":16777216}',
+        f'{{"do_resize":true,"min_pixels":4096,"max_pixels":{MAX_IMAGE_PIXELS}}}',
         "--media-io-kwargs",
         '{"video":{"num_frames":256}}',
     ]
@@ -185,6 +194,7 @@ def write_manifest(contract: JobContract, command: Sequence[str]) -> Path:
         "precision": "bfloat16",
         "quantization": None,
         "kv_cache_dtype": "auto",
+        "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
         "python": sys.version,
         "packages": {
             name: package_version(name)
@@ -347,6 +357,10 @@ def evaluator_command(
         str(contract.workers),
         "--seed",
         "0",
+        "--max-tokens",
+        str(CANONICAL_MAX_TOKENS),
+        "--timeout",
+        f"{CANONICAL_TIMEOUT_SECONDS:g}",
         "--save-dir",
         str(save_dir),
         "--gcs-results-uri",

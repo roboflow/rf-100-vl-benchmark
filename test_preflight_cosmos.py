@@ -12,10 +12,10 @@ from evaluate_cosmos import PROMPT_VERSION, validate_preflight_report
 from preflight_cosmos import main, validate_dataset
 
 
-def _write_dataset(root: Path, bbox=None) -> Path:
+def _write_dataset(root: Path, bbox=None, dataset_name="toy-dataset") -> Path:
     from PIL import Image
 
-    dataset = root / "toy-dataset"
+    dataset = root / dataset_name
     test_directory = dataset / "test"
     test_directory.mkdir(parents=True)
     Image.new("RGB", (20, 10), color="white").save(test_directory / "one.png")
@@ -235,6 +235,61 @@ class PreflightEndToEndTests(unittest.TestCase):
                 self.assertEqual(
                     report["gcs"]["operations"],
                     ["create", "update", "list", "read", "restore", "delete"],
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_all_100_dummy_datasets_endpoint_gcs_and_report(self):
+        """Exercise the exact all-dataset gate without downloading RF100VL."""
+
+        try:
+            import openai  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError:
+            self.skipTest("Cosmos integration dependencies are not installed")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelsHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dataset_root = root / "rf100"
+                for index in range(100):
+                    _write_dataset(
+                        dataset_root,
+                        dataset_name=f"dataset-{index:03d}",
+                    )
+                report_path = root / "report.json"
+                _DirectoryArtifactStore.root = root / "fake-gcs"
+                with mock.patch(
+                    "preflight_cosmos.GCSArtifactStore", _DirectoryArtifactStore
+                ):
+                    return_code = main(
+                        [
+                            "--dataset-dir",
+                            str(dataset_root),
+                            "--expected-datasets",
+                            "100",
+                            "--base-url",
+                            f"http://127.0.0.1:{server.server_port}/v1",
+                            "--gcs-test-uri",
+                            "gs://benchmark-artifacts/preflight/test-100",
+                            "--report",
+                            str(report_path),
+                        ]
+                    )
+                self.assertEqual(return_code, 0)
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                self.assertEqual(report["status"], "passed")
+                self.assertEqual(report["dataset"]["dataset_count"], 100)
+                self.assertEqual(report["dataset"]["image_count"], 100)
+                self.assertEqual(report["dataset"]["annotation_count"], 100)
+                self.assertEqual(len(report["dataset"]["datasets"]), 100)
+                self.assertTrue(
+                    (_DirectoryArtifactStore.root / "preflight_report.json").is_file()
                 )
         finally:
             server.shutdown()

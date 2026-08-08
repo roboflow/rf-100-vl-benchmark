@@ -41,6 +41,7 @@ docker run --rm --gpus all \
   --kv-cache-dtype auto \
   --seed 0 \
   --max-model-len 131072 \
+  --gpu-memory-utilization 0.80 \
   --allowed-local-media-path /data \
   --mm-processor-kwargs '{"do_resize":true,"min_pixels":4096,"max_pixels":16777216}' \
   --media-io-kwargs '{"video":{"num_frames":256}}'
@@ -50,7 +51,20 @@ BF16 is the checkpoint's published tensor type and the only precision NVIDIA
 currently tests for Cosmos3-Edge. Do not add `--quantization`, use FP8/FP4 KV
 cache, or force FP16 for the primary benchmark. `--kv-cache-dtype auto` keeps the
 KV cache at the model dtype. For the cleanest primary result, use one GPU and do
-not enable tensor parallelism or layer offload.
+not enable tensor parallelism or layer offload. The explicit 0.80 memory
+utilization only reduces vLLM's KV-cache reservation and leaves GPU headroom; it
+does not change model weights, precision, inputs, logits, or decoding settings.
+
+The canonical evaluator requests at most 100,000 output tokens. Cosmos's pinned
+131,072-token context counts image/prompt and output together, so the remaining
+31,072-token input allowance is intentional. At the configured maximum image
+area, Cosmos's 16-pixel patch and 2x2 spatial merge use about 16,384 vision
+tokens, still leaving roughly 14,688 tokens for class names, the prompt, and
+template markers. A response that nevertheless reaches the cap is saved in full
+as an error and is not deterministically retried. The paired request timeout is
+30 minutes so the larger allowance is usable; if that timeout is reached after
+an expensive generation, that request is also recorded once rather than
+automatically repeated four times.
 
 Install the evaluation-side dependencies:
 
@@ -66,7 +80,7 @@ Do not begin the 100-dataset run until every gate in
 version is:
 
 1. Run all offline prompt, request, parser, coordinate, scoring, GCS-resume,
-   and GCS-failure tests.
+   truncation, full-100-dummy-dataset, and GCS-failure tests.
 2. Run the opt-in test against the real GCS bucket and pod credentials.
 3. Validate all 100 test annotation files, every referenced image and its pixel
    dimensions, every category mapping, the live endpoint's model identity, and

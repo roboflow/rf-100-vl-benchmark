@@ -36,6 +36,13 @@ This suite must have zero failures and zero skips. It covers:
 - atomic per-image records, aggregate outputs, and success-marker behavior;
 - simulated total local-disk loss followed by GCS-only resume;
 - immediate termination of evaluation when a durable record upload fails.
+- preservation and immediate failure of a token-capped response without four
+  identical retries;
+- a simulated generation timeout proving an expensive request is not repeated;
+- a complete 100-dummy-dataset inference, COCO scoring, checkpoint, aggregate,
+  and success-marker run through a fake OpenAI endpoint and local GCS double;
+- the 100,000-token output cap's input reserve and the explicit 0.80 vLLM
+  memory-reservation contract.
 
 The separate real-GCS test is intentionally skipped here because it requires
 live credentials; Gate 2 runs it explicitly.

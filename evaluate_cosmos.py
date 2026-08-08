@@ -38,12 +38,37 @@ MODEL_ID = "nvidia/Cosmos3-Edge"
 SYSTEM_PROMPT = None
 PROMPT_VERSION = "cosmos3-edge-rf100-basic-v2"
 NORMALIZED_COORDINATE_MAX = 1000.0
+# The pinned model configuration has a 131,072-token combined input/output
+# context. Reserving 31,072 tokens for the image, class list, and chat template
+# allows a deliberately generous output ceiling without making valid RF100VL
+# image requests fail vLLM's context-length check.
+CANONICAL_MAX_TOKENS = 100_000
+CANONICAL_TIMEOUT_SECONDS = 1800.0
 
 LOGGER = logging.getLogger("rf100_cosmos")
 
 
 class CosmosResponseError(ValueError):
     """Raised when a Cosmos response cannot be used as a detection result."""
+
+
+class CosmosTruncatedResponseError(CosmosResponseError):
+    """Preserve a token-capped response so the failure remains diagnosable."""
+
+    def __init__(
+        self,
+        response: str,
+        finish_reason: str,
+        usage: dict[str, Any] | None,
+        elapsed_seconds: float,
+    ):
+        super().__init__(
+            "The response hit max_tokens and may contain incomplete detections."
+        )
+        self.response = response
+        self.finish_reason = finish_reason
+        self.usage = usage
+        self.elapsed_seconds = elapsed_seconds
 
 
 class GCSArtifactError(RuntimeError):
@@ -613,20 +638,36 @@ class CosmosInferenceClient:
                     raise CosmosResponseError(
                         f"Expected string response content, received {type(content).__name__}."
                     )
-                if choice.finish_reason == "length":
-                    raise CosmosResponseError(
-                        "The response hit max_tokens and may contain incomplete detections."
-                    )
                 usage = None
                 if response.usage is not None:
                     usage = response.usage.model_dump()
+                if choice.finish_reason == "length":
+                    raise CosmosTruncatedResponseError(
+                        response=content,
+                        finish_reason=choice.finish_reason,
+                        usage=usage,
+                        elapsed_seconds=elapsed,
+                    )
                 return {
                     "response": content,
                     "finish_reason": choice.finish_reason,
                     "usage": usage,
                     "elapsed_seconds": elapsed,
                 }
+            except CosmosTruncatedResponseError:
+                # Temperature zero plus a fixed seed makes this response
+                # deterministic. Repeating it only burns GPU time and used to
+                # discard the exact content needed to diagnose the token cap.
+                raise
             except Exception as error:  # API exception types vary by openai version.
+                if type(error).__name__ == "APITimeoutError":
+                    # A timeout can follow many minutes of live generation.
+                    # Stop and checkpoint the failure instead of paying for the
+                    # same temperature-zero request up to four times.
+                    raise RuntimeError(
+                        f"Inference timed out after {self.args.timeout:g}s; "
+                        "the request was not automatically retried."
+                    ) from error
                 last_error = error
                 if attempt >= self.args.retries:
                     break
@@ -691,6 +732,18 @@ def process_image(
             "finish_reason": inference["finish_reason"],
             "usage": inference["usage"],
             "inference_seconds": inference["elapsed_seconds"],
+            "total_seconds": time.monotonic() - started,
+        }
+    except CosmosTruncatedResponseError as error:
+        return {
+            "status": "error",
+            "image_id": image_id,
+            "file_name": file_name,
+            "error": f"{type(error).__name__}: {error}",
+            "raw_response": error.response,
+            "finish_reason": error.finish_reason,
+            "usage": error.usage,
+            "inference_seconds": error.elapsed_seconds,
             "total_seconds": time.monotonic() - started,
         }
     except Exception as error:
@@ -1211,9 +1264,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=1,
         help="Concurrent requests. Default 1 is the conservative reproducible setting.",
     )
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=CANONICAL_MAX_TOKENS,
+        help=(
+            "Maximum generated tokens per image. The canonical benchmark uses "
+            f"{CANONICAL_MAX_TOKENS}; token-capped responses are saved as errors."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=CANONICAL_TIMEOUT_SECONDS,
+        help=(
+            "Per-request timeout in seconds. Timeouts are not automatically "
+            "retried because generation may already have consumed this full interval."
+        ),
+    )
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-base-delay", type=float, default=2.0)
     parser.add_argument("--retry-max-delay", type=float, default=60.0)

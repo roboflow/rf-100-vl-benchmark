@@ -7,10 +7,12 @@ from pathlib import Path
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 from evaluate_cosmos import (
+    CANONICAL_MAX_TOKENS,
     CosmosResponseError,
     GCSArtifactError,
     build_cosmos_chat_request,
@@ -266,6 +268,120 @@ class _MockCosmosHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _LengthCosmosHandler(BaseHTTPRequestHandler):
+    """Return a deterministic token-capped completion for failure testing."""
+
+    requests = []
+
+    def do_POST(self):
+        content_length = int(self.headers["Content-Length"])
+        request = json.loads(self.rfile.read(content_length))
+        type(self).requests.append(request)
+        response = {
+            "id": "mock-length-completion",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "nvidia/Cosmos3-Edge",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": '[{"bbox_2d":[0,0,1000',
+                    },
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": CANONICAL_MAX_TOKENS,
+                "total_tokens": 500 + CANONICAL_MAX_TOKENS,
+            },
+        }
+        encoded = json.dumps(response).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _TimeoutCosmosHandler(BaseHTTPRequestHandler):
+    requests = 0
+
+    def do_POST(self):
+        content_length = int(self.headers["Content-Length"])
+        self.rfile.read(content_length)
+        type(self).requests += 1
+        time.sleep(0.25)
+        encoded = json.dumps(
+            {
+                "id": "too-late",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "nvidia/Cosmos3-Edge",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "[]"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _write_single_image_dataset(root: Path, dataset_name: str) -> Path:
+    from PIL import Image
+
+    dataset = root / dataset_name
+    test_directory = dataset / "test"
+    test_directory.mkdir(parents=True)
+    Image.new("RGB", (32, 24), color="white").save(test_directory / "one.png")
+    annotations = {
+        "info": {},
+        "licenses": [],
+        "images": [
+            {
+                "id": 1,
+                "file_name": "one.png",
+                "width": 32,
+                "height": 24,
+            }
+        ],
+        "categories": [{"id": 1, "name": "cat", "supercategory": "object"}],
+        "annotations": [
+            {
+                "id": 1,
+                "image_id": 1,
+                "category_id": 1,
+                "bbox": [0, 0, 32, 24],
+                "area": 768,
+                "segmentation": [],
+                "iscrowd": 0,
+            }
+        ],
+    }
+    (test_directory / "_annotations.coco.json").write_text(
+        json.dumps(annotations), encoding="utf-8"
+    )
+    return dataset
+
+
 class _DirectoryArtifactStore:
     """Test double that treats a local directory as an exact GCS run root."""
 
@@ -308,6 +424,123 @@ class _FailingRecordArtifactStore(_DirectoryArtifactStore):
 
 
 class CosmosEndToEndTests(unittest.TestCase):
+    def test_expensive_timeout_is_not_automatically_retried(self):
+        try:
+            import openai  # noqa: F401
+            from PIL import Image  # noqa: F401
+            import pycocotools  # noqa: F401
+        except ImportError:
+            self.skipTest("Cosmos integration dependencies are not installed")
+
+        _TimeoutCosmosHandler.requests = 0
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _TimeoutCosmosHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dataset_root = root / "rf100"
+                _write_single_image_dataset(dataset_root, "timeout-dataset")
+                return_code = main(
+                    [
+                        "--dataset-dir",
+                        str(dataset_root),
+                        "--base-url",
+                        f"http://127.0.0.1:{server.server_port}/v1",
+                        "--workers",
+                        "1",
+                        "--timeout",
+                        "0.05",
+                        "--retries",
+                        "3",
+                        "--save-dir",
+                        str(root / "output"),
+                    ]
+                )
+                self.assertEqual(return_code, 1)
+                self.assertEqual(_TimeoutCosmosHandler.requests, 1)
+                error_path = next(
+                    (root / "output" / "timeout-dataset").glob("errors_*.jsonl")
+                )
+                error = json.loads(error_path.read_text(encoding="utf-8").strip())
+                self.assertIn("not automatically retried", error["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+    def test_token_capped_response_is_saved_and_never_retried(self):
+        try:
+            import openai  # noqa: F401
+            from PIL import Image  # noqa: F401
+            import pycocotools  # noqa: F401
+        except ImportError:
+            self.skipTest("Cosmos integration dependencies are not installed")
+
+        _LengthCosmosHandler.requests = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _LengthCosmosHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dataset_root = root / "rf100"
+                _write_single_image_dataset(dataset_root, "length-dataset")
+                output = root / "output"
+                _DirectoryArtifactStore.root = root / "remote-artifacts"
+                with mock.patch(
+                    "evaluate_cosmos.GCSArtifactStore", _DirectoryArtifactStore
+                ):
+                    return_code = main(
+                        [
+                            "--dataset-dir",
+                            str(dataset_root),
+                            "--base-url",
+                            f"http://127.0.0.1:{server.server_port}/v1",
+                            "--workers",
+                            "1",
+                            "--retries",
+                            "3",
+                            "--save-dir",
+                            str(output),
+                            "--gcs-results-uri",
+                            "gs://benchmark-artifacts/cosmos/length-test",
+                        ]
+                    )
+                self.assertEqual(return_code, 1)
+                self.assertEqual(len(_LengthCosmosHandler.requests), 1)
+                self.assertEqual(
+                    _LengthCosmosHandler.requests[0]["max_tokens"],
+                    CANONICAL_MAX_TOKENS,
+                )
+                error_paths = list(
+                    (output / "length-dataset").glob("errors_*.jsonl")
+                )
+                self.assertEqual(len(error_paths), 1)
+                error = json.loads(
+                    error_paths[0].read_text(encoding="utf-8").strip()
+                )
+                self.assertEqual(error["finish_reason"], "length")
+                self.assertEqual(error["raw_response"], '[{"bbox_2d":[0,0,1000')
+                self.assertEqual(
+                    error["usage"]["completion_tokens"], CANONICAL_MAX_TOKENS
+                )
+                remote_error_paths = list(
+                    (_DirectoryArtifactStore.root / "length-dataset").glob(
+                        "errors_*.jsonl"
+                    )
+                )
+                self.assertEqual(len(remote_error_paths), 1)
+                aggregate = json.loads(
+                    (output / "aggregate_summary.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(aggregate["status"], "failed")
+                self.assertFalse((output / "_SUCCESS.json").exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
     def test_cli_inference_scoring_and_resume(self):
         try:
             from PIL import Image
@@ -409,6 +642,7 @@ class CosmosEndToEndTests(unittest.TestCase):
                 )
                 self.assertIn('["cat"]', user_content[1]["text"])
                 self.assertEqual(request["temperature"], 0.0)
+                self.assertEqual(request["max_tokens"], CANONICAL_MAX_TOKENS)
                 self.assertFalse(request["chat_template_kwargs"]["enable_thinking"])
 
                 summary = json.loads(
@@ -432,6 +666,130 @@ class CosmosEndToEndTests(unittest.TestCase):
                 self.assertTrue(
                     (_DirectoryArtifactStore.root / "_SUCCESS.json").is_file()
                 )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+    def test_full_100_dummy_dataset_inference_scoring_and_gcs_artifacts(self):
+        try:
+            import openai  # noqa: F401
+            from PIL import Image  # noqa: F401
+            import pycocotools  # noqa: F401
+            from preflight_cosmos import validate_dataset
+        except ImportError:
+            self.skipTest("Cosmos integration dependencies are not installed")
+
+        _MockCosmosHandler.requests = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _MockCosmosHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dataset_root = root / "rf100"
+                datasets = [
+                    _write_single_image_dataset(
+                        dataset_root, f"dataset-{index:03d}"
+                    )
+                    for index in range(100)
+                ]
+                base_url = f"http://127.0.0.1:{server.server_port}/v1"
+                preflight_report = root / "preflight_report.json"
+                preflight_report.write_text(
+                    json.dumps(
+                        {
+                            "status": "passed",
+                            "model_id": "nvidia/Cosmos3-Edge",
+                            "prompt_version": "cosmos3-edge-rf100-basic-v2",
+                            "dataset": {
+                                "dataset_count": 100,
+                                "datasets": [
+                                    validate_dataset(dataset) for dataset in datasets
+                                ],
+                            },
+                            "endpoint": {
+                                "base_url": base_url,
+                                "expected_model_id": "nvidia/Cosmos3-Edge",
+                                "advertised_model_ids": ["nvidia/Cosmos3-Edge"],
+                            },
+                            "gcs": {
+                                "parent_uri": "gs://benchmark-artifacts/preflight",
+                                "operations": [
+                                    "create",
+                                    "update",
+                                    "list",
+                                    "read",
+                                    "restore",
+                                    "delete",
+                                ],
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                output = root / "output"
+                _DirectoryArtifactStore.root = root / "remote-artifacts"
+                with mock.patch(
+                    "evaluate_cosmos.GCSArtifactStore", _DirectoryArtifactStore
+                ):
+                    return_code = main(
+                        [
+                            "--dataset-dir",
+                            str(dataset_root),
+                            "--base-url",
+                            base_url,
+                            "--workers",
+                            "1",
+                            "--retries",
+                            "0",
+                            "--expected-datasets",
+                            "100",
+                            "--preflight-report",
+                            str(preflight_report),
+                            "--save-dir",
+                            str(output),
+                            "--gcs-results-uri",
+                            "gs://benchmark-artifacts/cosmos/dummy-full",
+                        ]
+                    )
+                self.assertEqual(return_code, 0)
+                self.assertEqual(len(_MockCosmosHandler.requests), 100)
+                self.assertTrue(
+                    all(
+                        request["max_tokens"] == CANONICAL_MAX_TOKENS
+                        for request in _MockCosmosHandler.requests
+                    )
+                )
+                aggregate = json.loads(
+                    (output / "aggregate_summary.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(aggregate["status"], "complete")
+                self.assertEqual(aggregate["selected_dataset_count"], 100)
+                self.assertEqual(aggregate["processed_dataset_count"], 100)
+                self.assertEqual(aggregate["scored_dataset_count"], 100)
+                self.assertEqual(len(aggregate["datasets"]), 100)
+                self.assertTrue(
+                    all(
+                        summary["complete"]
+                        and summary["new_error_count"] == 0
+                        and abs(summary["metrics"]["AP"] - 1.0) < 1e-9
+                        for summary in aggregate["datasets"]
+                    )
+                )
+                self.assertTrue((output / "_SUCCESS.json").is_file())
+                self.assertTrue(
+                    (_DirectoryArtifactStore.root / "_SUCCESS.json").is_file()
+                )
+                for dataset in datasets:
+                    remote_dataset = _DirectoryArtifactStore.root / dataset.name
+                    self.assertTrue((remote_dataset / "summary.json").is_file())
+                    self.assertTrue(
+                        (remote_dataset / "cosmos_detection_results.json").is_file()
+                    )
+                    self.assertEqual(
+                        len(list((remote_dataset / "records").rglob("*.json"))), 1
+                    )
         finally:
             server.shutdown()
             server.server_close()
