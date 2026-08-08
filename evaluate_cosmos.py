@@ -5,10 +5,11 @@ This evaluator intentionally implements only the RF100-VL "basic" setting:
 each request contains one test image, the complete class list for that dataset,
 and a fixed output schema. It never reads train images or dataset instructions.
 
-The model is accessed through an OpenAI-compatible vLLM endpoint. Cosmos emits
-2D boxes as normalized [x1, y1, x2, y2] coordinates in the range 0..1000;
-this script converts them to COCO [x, y, width, height] boxes, checkpoints one
-record per image, and computes per-dataset COCO AP with maxDets=500.
+The model is accessed through an OpenAI-compatible vLLM endpoint. The prompt
+requests 2D boxes as normalized [x1, y1, x2, y2] coordinates in the range
+0..1000; this script converts them to COCO [x, y, width, height] boxes,
+checkpoints one record per image, and computes per-dataset COCO AP with
+maxDets=500.
 """
 
 from __future__ import annotations
@@ -33,10 +34,9 @@ import time
 from typing import Any, Iterable, Sequence
 from urllib.parse import quote, urlparse
 
-
 MODEL_ID = "nvidia/Cosmos3-Edge"
-SYSTEM_PROMPT = "You are a helpful assistant."
-PROMPT_VERSION = "cosmos3-edge-rf100-basic-v1"
+SYSTEM_PROMPT = None
+PROMPT_VERSION = "cosmos3-edge-rf100-basic-v2"
 NORMALIZED_COORDINATE_MAX = 1000.0
 
 LOGGER = logging.getLogger("rf100_cosmos")
@@ -55,9 +55,7 @@ def parse_gcs_uri(uri: str) -> tuple[str, str]:
 
     parsed = urlparse(uri)
     if parsed.scheme != "gs" or not parsed.netloc or parsed.query or parsed.fragment:
-        raise ValueError(
-            "--gcs-results-uri must be an exact gs://bucket/prefix URI."
-        )
+        raise ValueError("--gcs-results-uri must be an exact gs://bucket/prefix URI.")
     prefix = parsed.path.strip("/")
     if not prefix:
         raise ValueError(
@@ -90,8 +88,10 @@ class GCSArtifactStore:
     @staticmethod
     def _relative_name(relative_path: str | PurePosixPath) -> str:
         path = PurePosixPath(relative_path)
-        if path.is_absolute() or not path.parts or any(
-            part in ("", ".", "..") for part in path.parts
+        if (
+            path.is_absolute()
+            or not path.parts
+            or any(part in ("", ".", "..") for part in path.parts)
         ):
             raise ValueError(f"Unsafe artifact path: {relative_path!s}")
         return path.as_posix()
@@ -133,9 +133,7 @@ class GCSArtifactStore:
                 f"GCS create/read/list verification failed for {self.uri}: {error}"
             ) from error
 
-    def upload_file(
-        self, local_path: Path, relative_path: str | PurePosixPath
-    ) -> None:
+    def upload_file(self, local_path: Path, relative_path: str | PurePosixPath) -> None:
         object_name = self._object_name(relative_path)
         try:
             self.bucket.blob(object_name).upload_from_filename(str(local_path))
@@ -216,6 +214,44 @@ def build_detection_prompt(category_names: Sequence[str]) -> str:
         "origin at the top-left. Include one entry per object instance, use only "
         "the listed class names, and return [] if none are present."
     )
+
+
+def build_cosmos_messages(image_reference: str, prompt: str) -> list[dict[str, Any]]:
+    """Build the exact media-first message shape in NVIDIA's vLLM example."""
+
+    if not image_reference:
+        raise ValueError("The image reference cannot be empty.")
+    if not prompt:
+        raise ValueError("The detection prompt cannot be empty.")
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_reference}},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+
+
+def build_cosmos_chat_request(
+    image_reference: str,
+    prompt: str,
+    model_id: str,
+    max_tokens: int,
+    seed: int,
+    enable_thinking: bool,
+) -> dict[str, Any]:
+    """Build the deterministic OpenAI request sent to vLLM."""
+
+    return {
+        "model": model_id,
+        "messages": build_cosmos_messages(image_reference, prompt),
+        "temperature": 0,
+        "seed": seed,
+        "max_tokens": max_tokens,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": enable_thinking}},
+    }
 
 
 def _json_candidates(response_text: str) -> Iterable[str]:
@@ -309,6 +345,8 @@ def convert_detections_to_coco(
     ignored_labels: list[str] = []
     invalid_boxes = 0
     duplicate_boxes = 0
+    clamped_boxes = 0
+    reordered_boxes = 0
     seen: set[tuple[Any, ...]] = set()
 
     for detection in detections:
@@ -326,14 +364,19 @@ def convert_detections_to_coco(
             invalid_boxes += 1
             continue
 
+        original_coordinates = (x1, y1, x2, y2)
         x1, y1, x2, y2 = (
             min(NORMALIZED_COORDINATE_MAX, max(0.0, value))
             for value in (x1, y1, x2, y2)
         )
+        if (x1, y1, x2, y2) != original_coordinates:
+            clamped_boxes += 1
         if x1 > x2:
             x1, x2 = x2, x1
+            reordered_boxes += 1
         if y1 > y2:
             y1, y2 = y2, y1
+            reordered_boxes += 1
 
         x1_px = x1 * image_width / NORMALIZED_COORDINATE_MAX
         y1_px = y1 * image_height / NORMALIZED_COORDINATE_MAX
@@ -368,6 +411,8 @@ def convert_detections_to_coco(
         "accepted_detections": len(predictions),
         "invalid_boxes": invalid_boxes,
         "duplicate_boxes": duplicate_boxes,
+        "clamped_boxes": clamped_boxes,
+        "reordered_axes": reordered_boxes,
         "ignored_labels": ignored_labels,
     }
     return predictions, diagnostics
@@ -546,32 +591,19 @@ class CosmosInferenceClient:
         return client
 
     def infer(self, image_reference: str, prompt: str) -> dict[str, Any]:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                # NVIDIA specifies media before text for Cosmos grounding.
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_reference}},
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ]
-        extra_body = {
-            "chat_template_kwargs": {"enable_thinking": self.args.enable_thinking}
-        }
+        request = build_cosmos_chat_request(
+            image_reference=image_reference,
+            prompt=prompt,
+            model_id=self.args.model_id,
+            max_tokens=self.args.max_tokens,
+            seed=self.args.seed,
+            enable_thinking=self.args.enable_thinking,
+        )
         last_error: Exception | None = None
         for attempt in range(self.args.retries + 1):
             try:
                 started = time.monotonic()
-                response = self._client().chat.completions.create(
-                    model=self.args.model_id,
-                    messages=messages,
-                    temperature=0,
-                    seed=self.args.seed,
-                    max_tokens=self.args.max_tokens,
-                    extra_body=extra_body,
-                )
+                response = self._client().chat.completions.create(**request)
                 elapsed = time.monotonic() - started
                 if not response.choices:
                     raise CosmosResponseError("The API returned no choices.")
@@ -834,6 +866,70 @@ def discover_datasets(root: Path, requested_names: set[str] | None) -> list[Path
     return candidates
 
 
+def validate_preflight_report(
+    report_path: Path,
+    args: argparse.Namespace,
+    dataset_directories: Sequence[Path],
+) -> dict[str, Any]:
+    """Verify a full-run preflight report against the exact current inputs."""
+
+    try:
+        with report_path.open("r", encoding="utf-8") as file:
+            report = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"Could not read preflight report {report_path}: {error}"
+        ) from error
+
+    if report.get("status") != "passed":
+        raise ValueError(f"Preflight report {report_path} is not marked passed.")
+    if report.get("model_id") != args.model_id:
+        raise ValueError("Preflight model_id does not match the requested model.")
+    if report.get("prompt_version") != PROMPT_VERSION:
+        raise ValueError("Preflight prompt_version does not match this evaluator.")
+
+    endpoint = report.get("endpoint", {})
+    if endpoint.get(
+        "expected_model_id"
+    ) != args.model_id or args.model_id not in endpoint.get("advertised_model_ids", []):
+        raise ValueError("Preflight endpoint did not advertise the requested model.")
+    if str(endpoint.get("base_url", "")).rstrip("/") != args.base_url.rstrip("/"):
+        raise ValueError("Preflight endpoint URL does not match --base-url.")
+
+    dataset_report = report.get("dataset", {})
+    reported_datasets = dataset_report.get("datasets", [])
+    if dataset_report.get("dataset_count") != len(dataset_directories):
+        raise ValueError(
+            "Preflight dataset count does not match the selected datasets."
+        )
+    hashes_by_name = {
+        item.get("dataset"): item.get("annotation_sha256")
+        for item in reported_datasets
+        if isinstance(item, dict)
+    }
+    selected_names = {path.name for path in dataset_directories}
+    if set(hashes_by_name) != selected_names:
+        raise ValueError("Preflight dataset names do not match the selected datasets.")
+    for dataset_directory in dataset_directories:
+        annotation_path = resolve_annotation_file(dataset_directory / "test")
+        if hashes_by_name[dataset_directory.name] != sha256_file(annotation_path):
+            raise ValueError(
+                f"Preflight annotation hash changed for {dataset_directory.name}."
+            )
+
+    required_gcs_operations = {"create", "update", "list", "read", "restore", "delete"}
+    gcs_report = report.get("gcs", {})
+    if not required_gcs_operations.issubset(set(gcs_report.get("operations", []))):
+        raise ValueError("Preflight report does not cover the complete GCS contract.")
+    if not args.gcs_results_uri:
+        raise ValueError("A full benchmark requires --gcs-results-uri.")
+    preflight_bucket, _ = parse_gcs_uri(str(gcs_report.get("parent_uri", "")))
+    results_bucket, _ = parse_gcs_uri(args.gcs_results_uri)
+    if preflight_bucket != results_bucket:
+        raise ValueError("Preflight and result GCS buckets do not match.")
+    return report
+
+
 def run_dataset(
     dataset_directory: Path,
     dataset_root: Path,
@@ -1011,12 +1107,36 @@ def run_dataset(
 
     completed_image_count = sum(image["id"] in records for image in images)
     complete = completed_image_count == len(images)
+    diagnostics_summary = {
+        "parsed_detections": 0,
+        "accepted_detections": 0,
+        "invalid_boxes": 0,
+        "duplicate_boxes": 0,
+        "clamped_boxes": 0,
+        "reordered_axes": 0,
+        "ignored_label_count": 0,
+    }
+    for record in records.values():
+        diagnostics = record.get("diagnostics", {})
+        for key in (
+            "parsed_detections",
+            "accepted_detections",
+            "invalid_boxes",
+            "duplicate_boxes",
+            "clamped_boxes",
+            "reordered_axes",
+        ):
+            diagnostics_summary[key] += int(diagnostics.get(key, 0))
+        diagnostics_summary["ignored_label_count"] += len(
+            diagnostics.get("ignored_labels", [])
+        )
     result: dict[str, Any] = {
         "dataset": dataset_name,
         "image_count": len(images),
         "completed_image_count": completed_image_count,
         "new_error_count": len(errors),
         "prediction_count": len(predictions),
+        "diagnostics": diagnostics_summary,
         "complete": complete,
         "predictions_path": str(predictions_path),
     }
@@ -1132,6 +1252,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Fail before inference unless exactly this many datasets are selected.",
     )
+    parser.add_argument(
+        "--preflight-report",
+        type=Path,
+        default=None,
+        help="Passing report from preflight_cosmos.py; required for a full 100-dataset run.",
+    )
     parser.add_argument("--visualize-limit", type=int, default=0)
     parser.add_argument("--skip-scoring", action="store_true")
     args = parser.parse_args(argv)
@@ -1202,9 +1328,7 @@ def persist_aggregate(
     output_root: Path,
     artifact_store: GCSArtifactStore | None,
 ) -> dict[str, Any]:
-    aggregate = build_aggregate_summary(
-        args, summaries, selected_dataset_count, status
-    )
+    aggregate = build_aggregate_summary(args, summaries, selected_dataset_count, status)
     aggregate_path = output_root / "aggregate_summary.json"
     atomic_write_json(aggregate_path, aggregate)
     upload_artifact(artifact_store, aggregate_path, output_root)
@@ -1241,6 +1365,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             f"Expected exactly {args.expected_datasets} selected datasets, found "
             f"{len(dataset_directories)}. No inference was started."
+        )
+
+    is_full_rf100_benchmark = (
+        len(dataset_directories) == 100
+        and args.max_images is None
+        and not args.skip_scoring
+    )
+    if is_full_rf100_benchmark:
+        if args.expected_datasets != 100:
+            raise ValueError(
+                "A full RF100VL run must explicitly set --expected-datasets 100."
+            )
+        if not args.gcs_results_uri:
+            raise ValueError("A full RF100VL run requires --gcs-results-uri.")
+        if args.preflight_report is None:
+            raise ValueError(
+                "A full RF100VL run requires --preflight-report from preflight_cosmos.py."
+            )
+        validate_preflight_report(
+            args.preflight_report.resolve(), args, dataset_directories
         )
 
     artifact_store = (
@@ -1331,7 +1475,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         or unexpected_incomplete_count
         or unprocessed_count
     )
-    final_status = "failed" if failed else ("partial" if incomplete_count else "complete")
+    final_status = (
+        "failed" if failed else ("partial" if incomplete_count else "complete")
+    )
     aggregate = persist_aggregate(
         args,
         summaries,

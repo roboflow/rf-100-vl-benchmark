@@ -38,7 +38,8 @@ docker run --rm --gpus all \
   --seed 0 \
   --max-model-len 131072 \
   --allowed-local-media-path /data \
-  --mm-processor-kwargs '{"do_resize":true,"min_pixels":4096,"max_pixels":16777216}'
+  --mm-processor-kwargs '{"do_resize":true,"min_pixels":4096,"max_pixels":16777216}' \
+  --media-io-kwargs '{"video":{"num_frames":256}}'
 ```
 
 BF16 is the checkpoint's published tensor type and the only precision NVIDIA
@@ -53,6 +54,34 @@ Install the evaluation-side dependencies:
 # Python 3.10 or newer
 python -m pip install -r requirements-cosmos.txt
 ```
+
+## Required preflight gates
+
+Do not begin the 100-dataset run until every gate in
+[`COSMOS3_EDGE_PREFLIGHT.md`](COSMOS3_EDGE_PREFLIGHT.md) passes. The short
+version is:
+
+1. Run all offline prompt, request, parser, coordinate, scoring, GCS-resume,
+   and GCS-failure tests.
+2. Run the opt-in test against the real GCS bucket and pod credentials.
+3. Validate all 100 test annotation files, every referenced image and its pixel
+   dimensions, every category mapping, the live endpoint's model identity, and
+   real GCS create/update/list/read/restore/delete operations with
+   `preflight_cosmos.py`.
+4. Run ten real Cosmos images with visualizations, review raw JSON and box
+   overlays, then repeat from a fresh local output directory using the same GCS
+   prefix and confirm all ten records are restored with zero new requests.
+5. Complete and score one entire RF100VL test dataset before approving the full
+   run.
+
+NVIDIA's current [Cosmos3-Edge model card](https://huggingface.co/nvidia/Cosmos3-Edge)
+publishes the media-first OpenAI message shape and the `enable_thinking=False`
+switch, but it does **not** publish a canonical object-detection prompt or
+normalized coordinate range. Therefore 0–1000 xyxy is our explicit requested
+output contract, not a claimed built-in Cosmos standard. The mathematical
+conversion is unit-tested, while the live raw-output and visualization review
+is the required empirical check that Cosmos follows that contract on the
+deployed vLLM build.
 
 Start with a small, visualized smoke test using data URLs. Data URLs work even
 when the evaluator and server do not share filesystem paths:
@@ -86,7 +115,9 @@ python evaluate_cosmos.py \
   --dataset-dir /absolute/path/to/rf100-vl \
   --workers 1 \
   --expected-datasets 100 \
-  --save-dir ./cosmos-rf100-results
+  --save-dir ./cosmos-rf100-results \
+  --gcs-results-uri gs://YOUR_BUCKET/rf100vl/cosmos3-edge/YOUR_RUN_ID \
+  --preflight-report ./cosmos_preflight_report.json
 ```
 
 ## Durable GCS results and resume
@@ -105,7 +136,8 @@ python evaluate_cosmos.py \
   --workers 1 \
   --expected-datasets 100 \
   --save-dir ./cosmos-rf100-results \
-  --gcs-results-uri "${COSMOS_GCS_RESULTS_URI}"
+  --gcs-results-uri "${COSMOS_GCS_RESULTS_URI}" \
+  --preflight-report ./cosmos_preflight_report.json
 ```
 
 The Python client uses Google Application Default Credentials (ADC). On the

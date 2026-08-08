@@ -13,3 +13,5 @@ __pycache__/
 /cosmos-rf100-results/
 /cosmos-rf100-results-*/
 /results_Cosmos3-Edge_basic/
+/cosmos_preflight_report.json
+/cosmos-preflight-*/

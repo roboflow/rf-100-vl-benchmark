@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,21 +12,69 @@ from unittest import mock
 
 from evaluate_cosmos import (
     CosmosResponseError,
+    GCSArtifactError,
+    build_cosmos_chat_request,
+    build_cosmos_messages,
     build_detection_prompt,
     convert_detections_to_coco,
     main,
     parse_cosmos_response,
     parse_gcs_uri,
+    prepare_image_reference,
     score_coco,
 )
 
 
 class CosmosPromptTests(unittest.TestCase):
-    def test_prompt_contains_all_classes_as_json(self):
+    def test_detection_prompt_is_an_exact_golden_contract(self):
         prompt = build_detection_prompt(["red fox", 'class "quoted"'])
-        self.assertIn(json.dumps(["red fox", 'class "quoted"']), prompt)
-        self.assertIn("return []", prompt)
-        self.assertIn("0–1000", prompt)
+        self.assertEqual(
+            prompt,
+            "Locate every instance of each of the following object classes in the image:\n"
+            '["red fox", "class \\"quoted\\""]\n\n'
+            "Return only a JSON array in this exact form:\n"
+            '[{"bbox_2d":[x1,y1,x2,y2],"label":"one class name exactly"}]\n\n'
+            "Use integer coordinates normalized independently to 0–1000, with the "
+            "origin at the top-left. Include one entry per object instance, use only "
+            "the listed class names, and return [] if none are present.",
+        )
+        for forbidden in ("README", "few-shot", "training image", "example answer"):
+            self.assertNotIn(forbidden, prompt)
+
+    def test_message_template_matches_nvidia_media_first_example(self):
+        self.assertEqual(
+            build_cosmos_messages("data:image/png;base64,abc", "detect"),
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,abc"},
+                        },
+                        {"type": "text", "text": "detect"},
+                    ],
+                }
+            ],
+        )
+
+    def test_chat_request_disables_thinking_and_is_deterministic(self):
+        request = build_cosmos_chat_request(
+            "data:image/png;base64,abc",
+            "detect",
+            model_id="nvidia/Cosmos3-Edge",
+            max_tokens=4096,
+            seed=0,
+            enable_thinking=False,
+        )
+        self.assertEqual(request["temperature"], 0)
+        self.assertEqual(request["seed"], 0)
+        self.assertEqual(request["max_tokens"], 4096)
+        self.assertEqual(
+            request["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        self.assertEqual([message["role"] for message in request["messages"]], ["user"])
 
 
 class GCSConfigurationTests(unittest.TestCase):
@@ -33,9 +83,36 @@ class GCSConfigurationTests(unittest.TestCase):
             parse_gcs_uri("gs://benchmark-artifacts/cosmos/run-1"),
             ("benchmark-artifacts", "cosmos/run-1"),
         )
-        for invalid in ("https://bucket/run", "gs://bucket", "gs:///run"):
+        for invalid in (
+            "https://bucket/run",
+            "gs://bucket",
+            "gs:///run",
+            "gs://bucket/run/../escape",
+        ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_gcs_uri(invalid)
+
+
+class FullRunGuardTests(unittest.TestCase):
+    def test_detected_full_run_requires_preflight_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_datasets = [root / f"dataset-{index:03d}" for index in range(100)]
+            with mock.patch(
+                "evaluate_cosmos.discover_datasets", return_value=fake_datasets
+            ), self.assertRaisesRegex(ValueError, "requires --preflight-report"):
+                main(
+                    [
+                        "--dataset-dir",
+                        str(root),
+                        "--expected-datasets",
+                        "100",
+                        "--gcs-results-uri",
+                        "gs://benchmark-artifacts/cosmos/full-run",
+                        "--save-dir",
+                        str(root / "output"),
+                    ]
+                )
 
 
 class CosmosParserTests(unittest.TestCase):
@@ -72,6 +149,26 @@ class CosmosCoordinateTests(unittest.TestCase):
         self.assertEqual(predictions[0]["score"], 1.0)
         self.assertEqual(diagnostics["accepted_detections"], 1)
 
+    def test_non_square_image_scales_each_axis_independently(self):
+        predictions, _ = convert_detections_to_coco(
+            [{"bbox_2d": [250, 100, 750, 900], "label": "traffic light"}],
+            image_id=11,
+            image_width=640,
+            image_height=480,
+            categories_by_id={17: "traffic light"},
+        )
+        self.assertEqual(predictions[0]["bbox"], [160.0, 48.0, 320.0, 384.0])
+
+    def test_ambiguous_normalized_category_names_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not unique"):
+            convert_detections_to_coco(
+                [],
+                image_id=1,
+                image_width=100,
+                image_height=100,
+                categories_by_id={1: "Cat", 2: " cat "},
+            )
+
     def test_clamps_reorders_deduplicates_and_uses_exact_labels(self):
         detections = [
             {"bbox_2d": [1100, 900, -100, 100], "label": " cat "},
@@ -90,7 +187,48 @@ class CosmosCoordinateTests(unittest.TestCase):
         self.assertEqual(predictions[0]["bbox"], [0.0, 10.0, 200.0, 80.0])
         self.assertEqual(diagnostics["duplicate_boxes"], 1)
         self.assertEqual(diagnostics["invalid_boxes"], 1)
+        self.assertEqual(diagnostics["clamped_boxes"], 2)
+        self.assertEqual(diagnostics["reordered_axes"], 4)
         self.assertEqual(diagnostics["ignored_labels"], ["caterpillar"])
+
+
+class CosmosImagePreparationTests(unittest.TestCase):
+    def test_grayscale_input_is_converted_to_rgb_without_changing_dimensions(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image_path = root / "gray.png"
+            Image.new("L", (20, 10), color=128).save(image_path)
+            reference = prepare_image_reference(
+                image_path=image_path,
+                expected_width=20,
+                expected_height=10,
+                transport="data-url",
+                dataset_root=root,
+                server_media_root=None,
+            )
+            encoded = reference.split(",", 1)[1]
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as converted:
+                self.assertEqual(converted.mode, "RGB")
+                self.assertEqual(converted.size, (20, 10))
+
+    def test_metadata_dimension_mismatch_is_rejected(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image_path = root / "image.png"
+            Image.new("RGB", (20, 10), color="white").save(image_path)
+            with self.assertRaisesRegex(ValueError, "do not match COCO metadata"):
+                prepare_image_reference(
+                    image_path=image_path,
+                    expected_width=21,
+                    expected_height=10,
+                    transport="data-url",
+                    dataset_root=root,
+                    server_media_root=None,
+                )
 
 
 class _MockCosmosHandler(BaseHTTPRequestHandler):
@@ -160,6 +298,13 @@ class _DirectoryArtifactStore:
             shutil.copy2(path, target)
             count += 1
         return count
+
+
+class _FailingRecordArtifactStore(_DirectoryArtifactStore):
+    def upload_file(self, local_path: Path, relative_path):
+        if "records" in Path(str(relative_path)).parts:
+            raise GCSArtifactError("intentional record upload failure")
+        super().upload_file(local_path, relative_path)
 
 
 class CosmosEndToEndTests(unittest.TestCase):
@@ -257,7 +402,8 @@ class CosmosEndToEndTests(unittest.TestCase):
                 self.assertEqual(len(_MockCosmosHandler.requests), 2)
 
                 request = _MockCosmosHandler.requests[0]
-                user_content = request["messages"][1]["content"]
+                self.assertEqual(len(request["messages"]), 1)
+                user_content = request["messages"][0]["content"]
                 self.assertEqual(
                     [part["type"] for part in user_content], ["image_url", "text"]
                 )
@@ -272,6 +418,9 @@ class CosmosEndToEndTests(unittest.TestCase):
                 )
                 self.assertTrue(summary["complete"])
                 self.assertAlmostEqual(summary["metrics"]["AP"], 1.0)
+                self.assertEqual(summary["diagnostics"]["clamped_boxes"], 0)
+                self.assertEqual(summary["diagnostics"]["reordered_axes"], 0)
+                self.assertEqual(summary["diagnostics"]["ignored_label_count"], 0)
                 predictions = json.loads(
                     (
                         output / "toy-dataset" / "cosmos_detection_results.json"
@@ -280,7 +429,76 @@ class CosmosEndToEndTests(unittest.TestCase):
                 self.assertEqual(predictions[0]["bbox"], [0.0, 0.0, 100.0, 100.0])
                 self.assertEqual(len(predictions), 2)
                 self.assertAlmostEqual(score_coco(annotation_path, [])["AP"], 0.0)
-                self.assertTrue((_DirectoryArtifactStore.root / "_SUCCESS.json").is_file())
+                self.assertTrue(
+                    (_DirectoryArtifactStore.root / "_SUCCESS.json").is_file()
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+    def test_gcs_checkpoint_failure_stops_before_next_dataset(self):
+        try:
+            from PIL import Image
+            import openai  # noqa: F401
+            import pycocotools  # noqa: F401
+        except ImportError:
+            self.skipTest("Cosmos integration dependencies are not installed")
+
+        _MockCosmosHandler.requests = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _MockCosmosHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dataset_root = root / "rf100"
+                for dataset_name in ("dataset-a", "dataset-b"):
+                    test_directory = dataset_root / dataset_name / "test"
+                    test_directory.mkdir(parents=True)
+                    Image.new("RGB", (10, 10), color="white").save(
+                        test_directory / "one.png"
+                    )
+                    annotations = {
+                        "info": {},
+                        "licenses": [],
+                        "images": [
+                            {
+                                "id": 1,
+                                "file_name": "one.png",
+                                "width": 10,
+                                "height": 10,
+                            }
+                        ],
+                        "categories": [
+                            {"id": 1, "name": "cat", "supercategory": "object"}
+                        ],
+                        "annotations": [],
+                    }
+                    (test_directory / "_annotations.coco.json").write_text(
+                        json.dumps(annotations), encoding="utf-8"
+                    )
+
+                _FailingRecordArtifactStore.root = root / "remote-artifacts"
+                with mock.patch(
+                    "evaluate_cosmos.GCSArtifactStore", _FailingRecordArtifactStore
+                ):
+                    return_code = main(
+                        [
+                            "--dataset-dir",
+                            str(dataset_root),
+                            "--base-url",
+                            f"http://127.0.0.1:{server.server_port}/v1",
+                            "--retries",
+                            "0",
+                            "--save-dir",
+                            str(root / "output"),
+                            "--gcs-results-uri",
+                            "gs://benchmark-artifacts/cosmos/failure-test",
+                        ]
+                    )
+                self.assertEqual(return_code, 1)
+                self.assertEqual(len(_MockCosmosHandler.requests), 1)
         finally:
             server.shutdown()
             server.server_close()
