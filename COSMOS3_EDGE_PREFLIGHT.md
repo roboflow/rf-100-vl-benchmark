@@ -5,6 +5,11 @@ same commit, container image, vLLM arguments, model ID, BF16 precision, prompt
 version, worker count, dataset copy, and GCS credentials intended for the full
 benchmark.
 
+On RunPod these gates are automated by the image's `preflight` stage. It
+uploads a gate summary and self-terminates before the mandatory human visual
+review. The separately approved `full` stage consumes that evidence; see
+[`COSMOS3_EDGE_RUNPOD.md`](COSMOS3_EDGE_RUNPOD.md).
+
 ## Gate 1: offline contracts
 
 Install the benchmark dependencies and run the complete offline suite:
@@ -13,7 +18,8 @@ Install the benchmark dependencies and run the complete offline suite:
 python -m pip install -r requirements-cosmos.txt
 python -m unittest -v \
   test_evaluate_cosmos.py \
-  test_preflight_cosmos.py
+  test_preflight_cosmos.py \
+  test_runpod_cosmos.py
 ```
 
 This suite must have zero failures and zero skips. It covers:

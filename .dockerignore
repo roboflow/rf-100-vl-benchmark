@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+rf100-vl
+RF100VL
+RF100-VL
+cosmos-smoke
+cosmos-preflight-*
+cosmos-rf100-results*
+results_Cosmos3-Edge_basic
+infra/runpod.env

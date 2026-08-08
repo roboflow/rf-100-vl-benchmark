@@ -1,16 +1,20 @@
 # Cosmos3-Edge on RF100-VL
 
+For the self-contained RunPod image, staged preflight job, full job, durable
+artifact layout, and launch commands, see
+[`COSMOS3_EDGE_RUNPOD.md`](COSMOS3_EDGE_RUNPOD.md).
+
 `evaluate_cosmos.py` evaluates the basic zero-shot object-detection setting only.
 Every request contains one test image and the complete class list from that
 dataset's test COCO file. It does not read train images, few-shot examples,
 `README.dataset.txt`, or any other dataset instructions.
 
-The official downloader creates the directory layout expected by the evaluator:
+The pinned RF100VL package creates the directory layout expected by the evaluator:
 
 ```bash
-python -m pip install "rf100vl[cli]"
+python -m pip install "rf100vl==1.1.2"
 export ROBOFLOW_API_KEY=YOUR_KEY
-rf100vl download rf100vl ./rf100-vl/
+python infra/download_rf100vl.py --output-dir ./rf100-vl/
 ```
 
 Run the evaluator from the repository root and leave the downloaded directory at

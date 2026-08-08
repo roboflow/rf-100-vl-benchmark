@@ -1,0 +1,2 @@
+-r requirements-cosmos.txt
+rf100vl==1.1.2

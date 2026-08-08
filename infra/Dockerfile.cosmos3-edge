@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+ARG VLLM_BASE_IMAGE=vllm/vllm-openai:cosmos3
+FROM ${VLLM_BASE_IMAGE}
+
+ARG BENCHMARK_GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=${BENCHMARK_GIT_SHA}
+LABEL org.opencontainers.image.title="Cosmos3-Edge RF100VL benchmark"
+
+USER root
+WORKDIR /benchmark
+
+COPY requirements-cosmos.txt requirements-cosmos-runpod.txt ./
+RUN python3 -m pip install --no-cache-dir -r requirements-cosmos-runpod.txt
+
+COPY . .
+RUN chmod +x infra/cosmos_runpod_entrypoint.sh && \
+    python3 -m unittest -v \
+        test_evaluate_cosmos.py \
+        test_preflight_cosmos.py \
+        test_runpod_cosmos.py
+
+ENV BENCHMARK_GIT_SHA=${BENCHMARK_GIT_SHA}
+ENV HF_HOME=/workspace/huggingface
+ENV HF_HUB_CACHE=/workspace/huggingface/hub
+ENV HF_XET_HIGH_PERFORMANCE=1
+ENV COSMOS_WORK_DIR=/workspace/cosmos-runpod-work
+ENV RF100VL_DIR=/workspace/rf100-vl
+
+# Clear the upstream serving entrypoint: this image starts the server and the
+# evaluator together so their exact configuration is captured in one job.
+ENTRYPOINT []
+CMD ["bash", "infra/cosmos_runpod_entrypoint.sh"]

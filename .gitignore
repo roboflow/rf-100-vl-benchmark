@@ -2,6 +2,10 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
+/infra/runpod.env
+
+# Ephemeral RunPod control/work directories
+/cosmos-runpod-work/
 
 # Official RF100-VL download locations
 /rf100-vl/
