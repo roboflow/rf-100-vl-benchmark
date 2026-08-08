@@ -18,11 +18,7 @@ def main() -> int:
     from rf100vl import download_rf100vl
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    datasets = download_rf100vl(
-        str(args.output_dir),
-        model_format="coco",
-        overwrite=True,
-    )
+    datasets = download_rf100vl(path=str(args.output_dir))
     print(f"[data] downloader reported {len(datasets)} RF100VL datasets")
     return 0
 

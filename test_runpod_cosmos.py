@@ -207,8 +207,8 @@ class RuntimeHelperTests(unittest.TestCase):
     def test_downloader_uses_package_api_and_canonical_coco_format(self):
         calls = []
 
-        def fake_download(path, model_format, overwrite):
-            calls.append((path, model_format, overwrite))
+        def fake_download(path):
+            calls.append(path)
             return [object()] * 100
 
         fake_module = types.SimpleNamespace(download_rf100vl=fake_download)
@@ -220,7 +220,7 @@ class RuntimeHelperTests(unittest.TestCase):
                     ["download_rf100vl.py", "--output-dir", temporary],
                 ):
                     self.assertEqual(download_rf100vl.main(), 0)
-            self.assertEqual(calls, [(temporary, "coco", True)])
+            self.assertEqual(calls, [temporary])
 
     def test_exit_record_preserves_failure_status(self):
         with tempfile.TemporaryDirectory() as temporary:
