@@ -3,6 +3,7 @@ set -euo pipefail
 cd /benchmark
 
 WORK_DIR=${COSMOS_WORK_DIR:-/workspace/cosmos-runpod-work}
+EVAL_PYTHON=${COSMOS_EVAL_PYTHON:-/opt/cosmos-eval/bin/python}
 mkdir -p "${WORK_DIR}"
 JOB_LOG="${WORK_DIR}/job.log"
 
@@ -24,18 +25,18 @@ cleanup() {
     set +e
 
     local exit_record="${WORK_DIR}/job_exit.json"
-    python3 infra/write_job_exit.py \
+    "${EVAL_PYTHON}" infra/write_job_exit.py \
         --path "${exit_record}" \
         --stage "${COSMOS_STAGE:-unknown}" \
         --exit-code "${rc}" \
         --git-sha "${BENCHMARK_GIT_SHA:-unknown}" \
         --image-ref "${COSMOS_IMAGE_REF:-unknown}"
 
-    python3 infra/gcs_io.py upload-if-possible \
+    "${EVAL_PYTHON}" infra/gcs_io.py upload-if-possible \
         --root-uri "${COSMOS_GCS_RUN_URI:-}" \
         --source "${JOB_LOG}" \
         --relative-path "control/${COSMOS_STAGE:-unknown}/job.log"
-    python3 infra/gcs_io.py upload-if-possible \
+    "${EVAL_PYTHON}" infra/gcs_io.py upload-if-possible \
         --root-uri "${COSMOS_GCS_RUN_URI:-}" \
         --source "${exit_record}" \
         --relative-path "control/${COSMOS_STAGE:-unknown}/job_exit.json"
@@ -43,7 +44,7 @@ cleanup() {
     if [ -n "${RUNPOD_POD_ID:-}" ] && [ -n "${RUNPOD_API_KEY:-}" ] && \
        [ "${RUNPOD_TERMINATE_ON_EXIT:-1}" = "1" ]; then
         echo "[entrypoint] workload exited rc=${rc}; self-terminating pod"
-        python3 infra/runpod_self_terminate.py "${RUNPOD_POD_ID}"
+        "${EVAL_PYTHON}" infra/runpod_self_terminate.py "${RUNPOD_POD_ID}"
     fi
     exit "${rc}"
 }
@@ -52,7 +53,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 set +e
-python3 infra/run_cosmos_job.py 2>&1 | tee "${JOB_LOG}"
+"${EVAL_PYTHON}" infra/run_cosmos_job.py 2>&1 | tee "${JOB_LOG}"
 rc=${PIPESTATUS[0]}
 set -e
 exit "${rc}"

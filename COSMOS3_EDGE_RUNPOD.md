@@ -50,7 +50,9 @@ bash infra/build_and_push_cosmos.sh runpod-$(git rev-parse --short HEAD)
 ```
 
 The build runs the offline evaluator tests inside the release-tested
-`vllm/vllm-openai:cosmos3` base image. Record the immutable image reference
+`vllm/vllm-openai:cosmos3` base image. Evaluator and RF100VL downloader
+dependencies live in a separate virtual environment so their OpenCV constraint
+cannot modify the vLLM runtime. Record the immutable image reference
 printed at the end (`...@sha256:...`); the full launcher rejects a mutable tag.
 
 ## Choose one durable run root

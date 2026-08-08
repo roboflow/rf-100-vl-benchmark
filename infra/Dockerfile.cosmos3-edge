@@ -10,11 +10,18 @@ USER root
 WORKDIR /benchmark
 
 COPY requirements-cosmos.txt requirements-cosmos-runpod.txt ./
-RUN python3 -m pip install --no-cache-dir -r requirements-cosmos-runpod.txt
+# The RF100VL downloader currently pins OpenCV below vLLM's requirement. Keep
+# all evaluator/downloader dependencies isolated so the release-tested serving
+# environment remains byte-for-byte untouched.
+RUN python3 -m venv /opt/cosmos-eval && \
+    /opt/cosmos-eval/bin/python -m pip install --no-cache-dir \
+        -r requirements-cosmos-runpod.txt
 
 COPY . .
 RUN chmod +x infra/cosmos_runpod_entrypoint.sh && \
-    python3 -m unittest -v \
+    python3 -c \
+        "import importlib.metadata as m; from packaging.version import Version; assert Version(m.version('opencv-python-headless')) >= Version('4.13.0'); print('vllm=' + m.version('vllm'))" && \
+    /opt/cosmos-eval/bin/python -m unittest -v \
         test_evaluate_cosmos.py \
         test_preflight_cosmos.py \
         test_runpod_cosmos.py
@@ -25,6 +32,7 @@ ENV HF_HUB_CACHE=/workspace/huggingface/hub
 ENV HF_XET_HIGH_PERFORMANCE=1
 ENV COSMOS_WORK_DIR=/workspace/cosmos-runpod-work
 ENV RF100VL_DIR=/workspace/rf100-vl
+ENV COSMOS_EVAL_PYTHON=/opt/cosmos-eval/bin/python
 
 # Clear the upstream serving entrypoint: this image starts the server and the
 # evaluator together so their exact configuration is captured in one job.

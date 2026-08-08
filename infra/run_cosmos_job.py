@@ -137,7 +137,7 @@ def output_or_unknown(command: Sequence[str]) -> str:
 
 def vllm_command(contract: JobContract) -> list[str]:
     return [
-        "vllm",
+        "/usr/local/bin/vllm",
         "serve",
         contract.model_id,
         "--revision",
@@ -188,7 +188,23 @@ def write_manifest(contract: JobContract, command: Sequence[str]) -> Path:
         "python": sys.version,
         "packages": {
             name: package_version(name)
-            for name in ("vllm", "openai", "Pillow", "pycocotools", "google-cloud-storage", "rf100vl")
+            for name in ("openai", "Pillow", "pycocotools", "google-cloud-storage", "rf100vl")
+        },
+        "vllm_runtime": {
+            "vllm": output_or_unknown(
+                [
+                    "/usr/bin/python3",
+                    "-c",
+                    "import importlib.metadata as m; print(m.version('vllm'))",
+                ]
+            ),
+            "opencv_python_headless": output_or_unknown(
+                [
+                    "/usr/bin/python3",
+                    "-c",
+                    "import importlib.metadata as m; print(m.version('opencv-python-headless'))",
+                ]
+            ),
         },
         "gpu": output_or_unknown(
             [
