@@ -30,6 +30,7 @@ from run_cosmos_job import (
     find_first_ready_dataset,
     main as run_job_main,
     run_early_download_smoke,
+    run_full,
     select_smoke_dataset,
     start_dataset_acquisition,
     stop_dataset_acquisition,
@@ -55,7 +56,7 @@ def contract_environment(**overrides: str) -> dict[str, str]:
 
 
 class JobContractTests(unittest.TestCase):
-    def test_100k_output_budget_leaves_room_for_maximum_configured_image(self):
+    def test_bounded_output_budget_leaves_large_context_safety_margin(self):
         from evaluate_cosmos import CANONICAL_MAX_TOKENS
 
         image_token_upper_bound = MAX_IMAGE_PIXELS // (
@@ -64,11 +65,11 @@ class JobContractTests(unittest.TestCase):
         remaining_after_image = (
             MAX_MODEL_LENGTH - CANONICAL_MAX_TOKENS - image_token_upper_bound
         )
-        self.assertEqual(CANONICAL_MAX_TOKENS, 100_000)
+        self.assertEqual(CANONICAL_MAX_TOKENS, 8_192)
         self.assertEqual(image_token_upper_bound, 16_384)
         # RF100VL class lists are far smaller; this reserve also covers chat
         # template and vision boundary tokens without approaching the limit.
-        self.assertGreaterEqual(remaining_after_image, 14_000)
+        self.assertGreaterEqual(remaining_after_image, 100_000)
 
     def test_preflight_contract_pins_fair_inference_settings(self):
         with mock.patch.dict(os.environ, contract_environment(), clear=True):
@@ -96,6 +97,21 @@ class JobContractTests(unittest.TestCase):
         with mock.patch.dict(os.environ, environment, clear=True):
             self.assertTrue(JobContract.from_environment().preflight_approved)
 
+    def test_incomplete_preflight_override_is_restricted_to_approved_full_runs(self):
+        environment = contract_environment(COSMOS_ALLOW_INCOMPLETE_PREFLIGHT="1")
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "approved full stage"):
+                JobContract.from_environment()
+        environment.update(
+            {
+                "COSMOS_STAGE": "full",
+                "COSMOS_PREFLIGHT_APPROVED": "1",
+            }
+        )
+        with mock.patch.dict(os.environ, environment, clear=True):
+            contract = JobContract.from_environment()
+        self.assertTrue(contract.allow_incomplete_preflight)
+
     def test_noncanonical_dataset_count_or_concurrency_is_rejected(self):
         for override in (
             {"COSMOS_EXPECTED_DATASETS": "99"},
@@ -120,8 +136,8 @@ class JobContractTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--expected-datasets") + 1], "100")
         self.assertEqual(command[command.index("--workers") + 1], "1")
-        self.assertEqual(command[command.index("--max-tokens") + 1], "100000")
-        self.assertEqual(command[command.index("--timeout") + 1], "1800")
+        self.assertEqual(command[command.index("--max-tokens") + 1], "8192")
+        self.assertEqual(command[command.index("--timeout") + 1], "180")
         self.assertEqual(command[command.index("--preflight-report") + 1], "/report.json")
         self.assertNotIn("--max-images", command)
         self.assertNotIn("--enable-thinking", command)
@@ -368,11 +384,63 @@ class LauncherDryRunTests(unittest.TestCase):
             "registry/image@sha256:" + "a" * 64,
             *base,
             "--preflight-approved",
+            "--allow-incomplete-preflight",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"COSMOS_ALLOW_INCOMPLETE_PREFLIGHT": "1"', result.stdout)
 
 
 class RuntimeHelperTests(unittest.TestCase):
+    def test_approved_full_override_requires_early_smoke_and_records_audit_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            contract = JobContract(
+                stage="full",
+                gcs_run_uri="gs://bucket/run",
+                work_dir=root / "work",
+                requested_dataset_dir=root / "rf100-vl",
+                model_id="nvidia/Cosmos3-Edge",
+                model_revision=PINNED_MODEL_REVISION,
+                expected_datasets=100,
+                workers=1,
+                smoke_dataset=None,
+                dataset_gcs_uri=None,
+                preflight_approved=True,
+                allow_incomplete_preflight=True,
+                image_ref="registry/image@sha256:" + "a" * 64,
+                benchmark_git_sha="test-sha",
+            )
+            store = mock.MagicMock()
+
+            def fake_download(uri: str, destination: Path) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if uri.endswith("early_download_smoke.json"):
+                    destination.write_text('{"status":"passed"}', encoding="utf-8")
+                else:
+                    destination.write_text('{"status":"passed"}', encoding="utf-8")
+
+            with (
+                mock.patch("run_cosmos_job.exists", return_value=False),
+                mock.patch("run_cosmos_job.download", side_effect=fake_download),
+                mock.patch("run_cosmos_job.evaluator_command", return_value=["evaluate"]),
+                mock.patch("run_cosmos_job.run_command") as run_command,
+                mock.patch(
+                    "run_cosmos_job.verify_full_result",
+                    return_value={"status": "complete"},
+                ),
+            ):
+                run_full(contract, root / "rf100-vl", store)
+
+            run_command.assert_called_once_with(["evaluate"])
+            override_path = contract.work_dir / "preflight_override.json"
+            override = json.loads(override_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                override["status"], "explicitly_approved_with_incomplete_smoke"
+            )
+            store.upload_file.assert_any_call(
+                override_path, "control/full/preflight_override.json"
+            )
+
     def test_complete_100_dataset_volume_is_reused_without_download(self):
         with tempfile.TemporaryDirectory() as temporary:
             dataset_root = Path(temporary) / "rf100-vl"
@@ -574,6 +642,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 smoke_dataset=None,
                 dataset_gcs_uri=None,
                 preflight_approved=False,
+                allow_incomplete_preflight=False,
                 image_ref="registry/image@sha256:" + "a" * 64,
                 benchmark_git_sha="test-sha",
             )
@@ -641,6 +710,7 @@ class RuntimeHelperTests(unittest.TestCase):
                 smoke_dataset=None,
                 dataset_gcs_uri=None,
                 preflight_approved=False,
+                allow_incomplete_preflight=False,
                 image_ref="registry/image@sha256:" + "a" * 64,
                 benchmark_git_sha="test-sha",
             )

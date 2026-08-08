@@ -55,16 +55,17 @@ not enable tensor parallelism or layer offload. The explicit 0.80 memory
 utilization only reduces vLLM's KV-cache reservation and leaves GPU headroom; it
 does not change model weights, precision, inputs, logits, or decoding settings.
 
-The canonical evaluator requests at most 100,000 output tokens. Cosmos's pinned
-131,072-token context counts image/prompt and output together, so the remaining
-31,072-token input allowance is intentional. At the configured maximum image
-area, Cosmos's 16-pixel patch and 2x2 spatial merge use about 16,384 vision
-tokens, still leaving roughly 14,688 tokens for class names, the prompt, and
-template markers. A response that nevertheless reaches the cap is saved in full
-as an error and is not deterministically retried. The paired request timeout is
-30 minutes so the larger allowance is usable; if that timeout is reached after
-an expensive generation, that request is also recorded once rather than
-automatically repeated four times.
+The canonical evaluator requests at most 8,192 output tokens and allows at most
+180 seconds per image. Valid detection JSON is normally much shorter; these
+bounds prevent a model that fails to emit EOS from monopolizing the GPU. A
+response that reaches the token cap is preserved, and a timeout is never
+automatically retried. Complete detection objects before a malformed or
+token-truncated tail are conservatively recovered; a timeout has no returned
+body and therefore contributes zero detections. Every such event is a durable
+per-image model-failure record, so its exact location remains auditable without
+making a dataset incomplete. Cosmos's pinned 131,072-token context still leaves
+more than 100,000 tokens of input headroom after reserving the configured
+maximum-size image and output allowance.
 
 Install the evaluation-side dependencies:
 

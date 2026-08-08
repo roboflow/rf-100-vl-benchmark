@@ -132,6 +132,48 @@ class CosmosParserTests(unittest.TestCase):
     def test_empty_array_is_valid(self):
         self.assertEqual(parse_cosmos_response("[]"), [])
 
+    def test_recovers_gemini_qwen_key_aliases_and_python_literals(self):
+        response = """```python
+{'predictions': [
+  {'box_2d': [1, 2, 3, 4], 'class_name': 'cat'},
+  {'bounding_box': [5, 6, 7, 8], 'name': 'dog'},
+]}
+```"""
+        self.assertEqual(
+            parse_cosmos_response(response),
+            [
+                {
+                    "box_2d": [1, 2, 3, 4],
+                    "class_name": "cat",
+                    "bbox_2d": [1, 2, 3, 4],
+                    "label": "cat",
+                },
+                {
+                    "bounding_box": [5, 6, 7, 8],
+                    "name": "dog",
+                    "bbox_2d": [5, 6, 7, 8],
+                    "label": "dog",
+                },
+            ],
+        )
+
+    def test_recovers_all_complete_objects_from_a_truncated_array(self):
+        response = (
+            '[{"bbox_2d":[1,2,3,4],"label":"cat"},'
+            '{"bbox":[5,6,7,8],"class":"dog"},'
+            '{"bbox_2d":[9,10'
+        )
+        detections = parse_cosmos_response(response)
+        self.assertEqual([item["label"] for item in detections], ["cat", "dog"])
+        self.assertEqual(detections[1]["bbox_2d"], [5, 6, 7, 8])
+
+    def test_recovers_embedded_json_and_trailing_commas(self):
+        response = (
+            'Here are the detections: '
+            '[{"bbox_2d":[1,2,3,4],"label":"cat",},] done.'
+        )
+        self.assertEqual(parse_cosmos_response(response)[0]["label"], "cat")
+
     def test_unparseable_response_raises(self):
         with self.assertRaises(CosmosResponseError):
             parse_cosmos_response("there are no objects")
@@ -287,7 +329,10 @@ class _LengthCosmosHandler(BaseHTTPRequestHandler):
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": '[{"bbox_2d":[0,0,1000',
+                        "content": (
+                            '[{"bbox_2d":[0,0,1000,1000],"label":"cat"},'
+                            '{"bbox_2d":[0,0,1000'
+                        ),
                     },
                     "finish_reason": "length",
                 }
@@ -457,13 +502,29 @@ class CosmosEndToEndTests(unittest.TestCase):
                         str(root / "output"),
                     ]
                 )
-                self.assertEqual(return_code, 1)
+                self.assertEqual(return_code, 0)
                 self.assertEqual(_TimeoutCosmosHandler.requests, 1)
                 error_path = next(
                     (root / "output" / "timeout-dataset").glob("errors_*.jsonl")
                 )
                 error = json.loads(error_path.read_text(encoding="utf-8").strip())
                 self.assertIn("not automatically retried", error["error"])
+                self.assertEqual(error["status"], "model_failure")
+                self.assertEqual(error["failure_type"], "timeout")
+                records = list(
+                    (root / "output" / "timeout-dataset" / "records").rglob("*.json")
+                )
+                self.assertEqual(len(records), 1)
+                summary = json.loads(
+                    (root / "output" / "timeout-dataset" / "summary.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertTrue(summary["complete"])
+                self.assertEqual(summary["new_error_count"], 0)
+                self.assertEqual(summary["model_failure_counts"]["timeout"], 1)
+                self.assertAlmostEqual(summary["metrics"]["AP"], 0.0)
+                self.assertTrue((root / "output" / "_SUCCESS.json").is_file())
         finally:
             server.shutdown()
             server.server_close()
@@ -507,7 +568,7 @@ class CosmosEndToEndTests(unittest.TestCase):
                             "gs://benchmark-artifacts/cosmos/length-test",
                         ]
                     )
-                self.assertEqual(return_code, 1)
+                self.assertEqual(return_code, 0)
                 self.assertEqual(len(_LengthCosmosHandler.requests), 1)
                 self.assertEqual(
                     _LengthCosmosHandler.requests[0]["max_tokens"],
@@ -521,7 +582,10 @@ class CosmosEndToEndTests(unittest.TestCase):
                     error_paths[0].read_text(encoding="utf-8").strip()
                 )
                 self.assertEqual(error["finish_reason"], "length")
-                self.assertEqual(error["raw_response"], '[{"bbox_2d":[0,0,1000')
+                self.assertEqual(error["status"], "model_failure")
+                self.assertEqual(error["failure_type"], "max_tokens")
+                self.assertIn('"label":"cat"', error["raw_response"])
+                self.assertEqual(error["salvaged_detection_count"], 1)
                 self.assertEqual(
                     error["usage"]["completion_tokens"], CANONICAL_MAX_TOKENS
                 )
@@ -534,8 +598,10 @@ class CosmosEndToEndTests(unittest.TestCase):
                 aggregate = json.loads(
                     (output / "aggregate_summary.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(aggregate["status"], "failed")
-                self.assertFalse((output / "_SUCCESS.json").exists())
+                self.assertEqual(aggregate["status"], "complete")
+                self.assertEqual(aggregate["model_failure_counts"]["max_tokens"], 1)
+                self.assertAlmostEqual(aggregate["macro_AP"], 1.0)
+                self.assertTrue((output / "_SUCCESS.json").exists())
         finally:
             server.shutdown()
             server.server_close()

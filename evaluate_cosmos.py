@@ -15,6 +15,7 @@ maxDets=500.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import concurrent.futures
 import contextlib
@@ -38,12 +39,22 @@ MODEL_ID = "nvidia/Cosmos3-Edge"
 SYSTEM_PROMPT = None
 PROMPT_VERSION = "cosmos3-edge-rf100-basic-v2"
 NORMALIZED_COORDINATE_MAX = 1000.0
-# The pinned model configuration has a 131,072-token combined input/output
-# context. Reserving 31,072 tokens for the image, class list, and chat template
-# allows a deliberately generous output ceiling without making valid RF100VL
-# image requests fail vLLM's context-length check.
-CANONICAL_MAX_TOKENS = 100_000
-CANONICAL_TIMEOUT_SECONDS = 1800.0
+# Object-detection JSON should be short. These bounds leave ample room within
+# Cosmos's 131,072-token context while preventing a missing EOS from consuming
+# the GPU indefinitely.
+CANONICAL_MAX_TOKENS = 8_192
+CANONICAL_TIMEOUT_SECONDS = 180.0
+
+BBOX_KEYS = ("bbox_2d", "box_2d", "bbox", "bounding_box", "bounding_box_2d")
+LABEL_KEYS = ("label", "class", "name", "class_label", "class_name")
+DETECTION_LIST_KEYS = (
+    "detections",
+    "boxes",
+    "objects",
+    "annotations",
+    "predictions",
+    "results",
+)
 
 LOGGER = logging.getLogger("rf100_cosmos")
 
@@ -69,6 +80,17 @@ class CosmosTruncatedResponseError(CosmosResponseError):
         self.finish_reason = finish_reason
         self.usage = usage
         self.elapsed_seconds = elapsed_seconds
+
+
+class CosmosInferenceTimeoutError(CosmosResponseError):
+    """A deterministic request exceeded the per-image wall-clock budget."""
+
+    def __init__(self, timeout_seconds: float):
+        super().__init__(
+            f"Inference timed out after {timeout_seconds:g}s; the request was not "
+            "automatically retried."
+        )
+        self.timeout_seconds = timeout_seconds
 
 
 class GCSArtifactError(RuntimeError):
@@ -290,6 +312,66 @@ def _json_candidates(response_text: str) -> Iterable[str]:
     yield without_thinking
 
 
+def _canonicalize_detection(value: dict[str, Any]) -> dict[str, Any]:
+    """Map harmless Gemini/Qwen-style key aliases onto the Cosmos schema."""
+
+    canonical = dict(value)
+    if "bbox_2d" not in canonical:
+        for key in BBOX_KEYS[1:]:
+            if key in value:
+                canonical["bbox_2d"] = value[key]
+                break
+    if "label" not in canonical:
+        for key in LABEL_KEYS[1:]:
+            if key in value:
+                canonical["label"] = value[key]
+                break
+    return canonical
+
+
+def _detection_items(value: Any) -> list[dict[str, Any]] | None:
+    if isinstance(value, list):
+        return [_canonicalize_detection(item) for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return None
+    if any(key in value for key in BBOX_KEYS):
+        return [_canonicalize_detection(value)]
+    for key in DETECTION_LIST_KEYS:
+        wrapped = value.get(key)
+        if isinstance(wrapped, list):
+            return [
+                _canonicalize_detection(item)
+                for item in wrapped
+                if isinstance(item, dict)
+            ]
+    return None
+
+
+def _recover_complete_detection_objects(text: str) -> list[dict[str, Any]]:
+    """Recover complete box objects from an otherwise truncated JSON array."""
+
+    decoder = json.JSONDecoder()
+    recovered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for start, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        canonical = _canonicalize_detection(value)
+        if "bbox_2d" not in canonical or "label" not in canonical:
+            continue
+        fingerprint = json.dumps(canonical, sort_keys=True, ensure_ascii=False)
+        if fingerprint not in seen:
+            recovered.append(canonical)
+            seen.add(fingerprint)
+    return recovered
+
+
 def _find_json_value(text: str) -> Any:
     """Decode the first usable JSON array/object embedded in text."""
 
@@ -301,9 +383,16 @@ def _find_json_value(text: str) -> Any:
             try:
                 value, _ = decoder.raw_decode(repaired)
             except json.JSONDecodeError:
-                continue
+                try:
+                    value = ast.literal_eval(repaired)
+                except (SyntaxError, ValueError):
+                    continue
             if isinstance(value, (list, dict)):
                 return value
+        if text[start] == "[":
+            recovered = _recover_complete_detection_objects(candidate)
+            if recovered:
+                return recovered
     raise CosmosResponseError(
         "No valid JSON array or object was found in the response."
     )
@@ -323,14 +412,9 @@ def parse_cosmos_response(response_text: str) -> list[dict[str, Any]]:
             last_error = error
             continue
 
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        if "bbox_2d" in value:
-            return [value]
-        for key in ("detections", "boxes", "objects", "annotations"):
-            wrapped = value.get(key)
-            if isinstance(wrapped, list):
-                return [item for item in wrapped if isinstance(item, dict)]
+        detections = _detection_items(value)
+        if detections is not None:
+            return detections
         last_error = CosmosResponseError(
             f"JSON object has no bbox_2d or supported detection list: {sorted(value)}"
         )
@@ -661,13 +745,10 @@ class CosmosInferenceClient:
                 raise
             except Exception as error:  # API exception types vary by openai version.
                 if type(error).__name__ == "APITimeoutError":
-                    # A timeout can follow many minutes of live generation.
+                    # A timeout can follow the full per-image generation budget.
                     # Stop and checkpoint the failure instead of paying for the
                     # same temperature-zero request up to four times.
-                    raise RuntimeError(
-                        f"Inference timed out after {self.args.timeout:g}s; "
-                        "the request was not automatically retried."
-                    ) from error
+                    raise CosmosInferenceTimeoutError(self.args.timeout) from error
                 last_error = error
                 if attempt >= self.args.retries:
                     break
@@ -684,9 +765,58 @@ class CosmosInferenceClient:
                     delay,
                 )
                 time.sleep(delay)
+        if isinstance(last_error, CosmosResponseError):
+            raise last_error
         raise RuntimeError(
             f"Inference failed after {self.args.retries + 1} attempts: {last_error}"
         ) from last_error
+
+
+def _empty_detection_diagnostics() -> dict[str, Any]:
+    return {
+        "parsed_detections": 0,
+        "accepted_detections": 0,
+        "invalid_boxes": 0,
+        "duplicate_boxes": 0,
+        "clamped_boxes": 0,
+        "reordered_axes": 0,
+        "ignored_labels": [],
+    }
+
+
+def _terminal_model_failure(
+    *,
+    image_id: int | str,
+    file_name: str,
+    failure_type: str,
+    error: Exception,
+    raw_response: str | None,
+    total_seconds: float,
+    finish_reason: str | None = None,
+    usage: dict[str, Any] | None = None,
+    inference_seconds: float | None = None,
+    predictions: list[dict[str, Any]] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Represent a model failure durably, retaining any safely salvaged boxes."""
+
+    record: dict[str, Any] = {
+        "status": "model_failure",
+        "failure_type": failure_type,
+        "image_id": image_id,
+        "file_name": file_name,
+        "predictions": predictions or [],
+        "diagnostics": diagnostics or _empty_detection_diagnostics(),
+        "salvaged_detection_count": len(predictions or []),
+        "error": f"{type(error).__name__}: {error}",
+        "raw_response": raw_response,
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "total_seconds": total_seconds,
+    }
+    if inference_seconds is not None:
+        record["inference_seconds"] = inference_seconds
+    return record
 
 
 def process_image(
@@ -735,17 +865,50 @@ def process_image(
             "total_seconds": time.monotonic() - started,
         }
     except CosmosTruncatedResponseError as error:
-        return {
-            "status": "error",
-            "image_id": image_id,
-            "file_name": file_name,
-            "error": f"{type(error).__name__}: {error}",
-            "raw_response": error.response,
-            "finish_reason": error.finish_reason,
-            "usage": error.usage,
-            "inference_seconds": error.elapsed_seconds,
-            "total_seconds": time.monotonic() - started,
-        }
+        salvaged_predictions: list[dict[str, Any]] = []
+        salvaged_diagnostics = _empty_detection_diagnostics()
+        try:
+            salvaged_detections = parse_cosmos_response(error.response)
+            salvaged_predictions, salvaged_diagnostics = convert_detections_to_coco(
+                detections=salvaged_detections,
+                image_id=image_id,
+                image_width=int(image_info["width"]),
+                image_height=int(image_info["height"]),
+                categories_by_id=categories_by_id,
+            )
+        except (CosmosResponseError, ValueError):
+            pass
+        return _terminal_model_failure(
+            image_id=image_id,
+            file_name=file_name,
+            failure_type="max_tokens",
+            error=error,
+            raw_response=error.response,
+            finish_reason=error.finish_reason,
+            usage=error.usage,
+            inference_seconds=error.elapsed_seconds,
+            total_seconds=time.monotonic() - started,
+            predictions=salvaged_predictions,
+            diagnostics=salvaged_diagnostics,
+        )
+    except CosmosInferenceTimeoutError as error:
+        return _terminal_model_failure(
+            image_id=image_id,
+            file_name=file_name,
+            failure_type="timeout",
+            error=error,
+            raw_response=raw_response,
+            total_seconds=time.monotonic() - started,
+        )
+    except CosmosResponseError as error:
+        return _terminal_model_failure(
+            image_id=image_id,
+            file_name=file_name,
+            failure_type="invalid_response",
+            error=error,
+            raw_response=raw_response,
+            total_seconds=time.monotonic() - started,
+        )
     except Exception as error:
         return {
             "status": "error",
@@ -765,7 +928,7 @@ def load_records(record_directory: Path) -> dict[int | str, dict[str, Any]]:
         try:
             with path.open("r", encoding="utf-8") as file:
                 record = json.load(file)
-            if record.get("status") == "success" and "image_id" in record:
+            if record.get("status") in {"success", "model_failure"} and "image_id" in record:
                 records[record["image_id"]] = record
         except (OSError, json.JSONDecodeError) as error:
             LOGGER.warning("Ignoring unreadable checkpoint %s: %s", path, error)
@@ -1061,7 +1224,8 @@ def run_dataset(
         len(pending),
     )
 
-    errors: list[dict[str, Any]] = []
+    infrastructure_errors: list[dict[str, Any]] = []
+    new_model_failures: list[dict[str, Any]] = []
     if pending:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=args.workers
@@ -1095,23 +1259,35 @@ def run_dataset(
             for future in completed_futures:
                 result = future.result()
                 image_id = result["image_id"]
-                if result["status"] == "success":
+                if result["status"] in {"success", "model_failure"}:
                     record_path = record_directory / _image_record_name(image_id)
                     atomic_write_json(record_path, result)
                     # A completed inference is not considered durable until its
                     # raw response and converted predictions reach GCS.
                     upload_artifact(artifact_store, record_path, output_root)
                     records[image_id] = result
-                    ignored = result["diagnostics"].get("ignored_labels", [])
-                    if ignored:
+                    if result["status"] == "model_failure":
+                        new_model_failures.append(result)
+                        errors_path = result_directory / f"errors_{run_hash}.jsonl"
+                        append_json_line(errors_path, result)
+                        upload_artifact(artifact_store, errors_path, output_root)
                         LOGGER.warning(
-                            "%s/%s: ignored labels not exactly in class list: %s",
+                            "%s/%s: terminal model failure counted as zero detections: %s",
                             dataset_name,
                             result["file_name"],
-                            ignored,
+                            result["error"],
                         )
+                    else:
+                        ignored = result["diagnostics"].get("ignored_labels", [])
+                        if ignored:
+                            LOGGER.warning(
+                                "%s/%s: ignored labels not exactly in class list: %s",
+                                dataset_name,
+                                result["file_name"],
+                                ignored,
+                            )
                 else:
-                    errors.append(result)
+                    infrastructure_errors.append(result)
                     errors_path = result_directory / f"errors_{run_hash}.jsonl"
                     append_json_line(errors_path, result)
                     upload_artifact(artifact_store, errors_path, output_root)
@@ -1160,6 +1336,16 @@ def run_dataset(
 
     completed_image_count = sum(image["id"] in records for image in images)
     complete = completed_image_count == len(images)
+    model_failure_records = [
+        record for record in records.values() if record.get("status") == "model_failure"
+    ]
+    model_failure_counts = {
+        failure_type: sum(
+            record.get("failure_type") == failure_type
+            for record in model_failure_records
+        )
+        for failure_type in ("timeout", "max_tokens", "invalid_response")
+    }
     diagnostics_summary = {
         "parsed_detections": 0,
         "accepted_detections": 0,
@@ -1187,7 +1373,15 @@ def run_dataset(
         "dataset": dataset_name,
         "image_count": len(images),
         "completed_image_count": completed_image_count,
-        "new_error_count": len(errors),
+        "successful_image_count": sum(
+            record.get("status") == "success" for record in records.values()
+        ),
+        # Hard infrastructure failures remain fatal. Deterministic model-side
+        # failures are durable zero-detection records and are reported below.
+        "new_error_count": len(infrastructure_errors),
+        "model_failure_count": len(model_failure_records),
+        "new_model_failure_count": len(new_model_failures),
+        "model_failure_counts": model_failure_counts,
         "prediction_count": len(predictions),
         "diagnostics": diagnostics_summary,
         "complete": complete,
@@ -1270,7 +1464,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=CANONICAL_MAX_TOKENS,
         help=(
             "Maximum generated tokens per image. The canonical benchmark uses "
-            f"{CANONICAL_MAX_TOKENS}; token-capped responses are saved as errors."
+            f"{CANONICAL_MAX_TOKENS}; token-capped responses are preserved and "
+            "counted as zero detections."
         ),
     )
     parser.add_argument("--seed", type=int, default=0)
@@ -1334,6 +1529,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     for name in ("workers", "max_tokens", "retries"):
         if getattr(args, name) < (0 if name == "retries" else 1):
             parser.error(f"--{name.replace('_', '-')} has an invalid value.")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive.")
     for name in ("max_datasets", "max_images", "expected_datasets"):
         value = getattr(args, name)
         if value is not None and value < 1:
@@ -1377,6 +1574,16 @@ def build_aggregate_summary(
         "dataset_count": len(summaries),
         "scored_dataset_count": len(scored),
         "expected_dataset_count": args.expected_datasets,
+        "model_failure_count": sum(
+            int(summary.get("model_failure_count", 0)) for summary in summaries
+        ),
+        "model_failure_counts": {
+            failure_type: sum(
+                int(summary.get("model_failure_counts", {}).get(failure_type, 0))
+                for summary in summaries
+            )
+            for failure_type in ("timeout", "max_tokens", "invalid_response")
+        },
         "datasets": list(summaries),
     }
     if scored:
@@ -1579,6 +1786,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "prompt_version": PROMPT_VERSION,
                 "scored_dataset_count": len(scored),
                 "expected_dataset_count": args.expected_datasets,
+                "model_failure_count": aggregate.get("model_failure_count", 0),
+                "model_failure_counts": aggregate.get("model_failure_counts", {}),
                 "macro_AP": aggregate.get("macro_AP"),
                 "macro_AP50": aggregate.get("macro_AP50"),
             },

@@ -72,6 +72,7 @@ class JobContract:
     smoke_dataset: str | None
     dataset_gcs_uri: str | None
     preflight_approved: bool
+    allow_incomplete_preflight: bool
     image_ref: str
     benchmark_git_sha: str
 
@@ -94,9 +95,16 @@ class JobContract:
         if workers != 1:
             raise ValueError("The canonical Cosmos benchmark requires COSMOS_WORKERS=1.")
         preflight_approved = env_truthy("COSMOS_PREFLIGHT_APPROVED")
+        allow_incomplete_preflight = env_truthy(
+            "COSMOS_ALLOW_INCOMPLETE_PREFLIGHT"
+        )
         if stage == "full" and not preflight_approved:
             raise ValueError(
                 "The full stage requires COSMOS_PREFLIGHT_APPROVED=1 after human visual review."
+            )
+        if allow_incomplete_preflight and (stage != "full" or not preflight_approved):
+            raise ValueError(
+                "COSMOS_ALLOW_INCOMPLETE_PREFLIGHT=1 requires an approved full stage."
             )
         dataset_gcs_uri = os.getenv("RF100VL_GCS_URI") or None
         if dataset_gcs_uri:
@@ -113,6 +121,7 @@ class JobContract:
             smoke_dataset=os.getenv("COSMOS_SMOKE_DATASET") or None,
             dataset_gcs_uri=dataset_gcs_uri,
             preflight_approved=preflight_approved,
+            allow_incomplete_preflight=allow_incomplete_preflight,
             image_ref=os.getenv("COSMOS_IMAGE_REF", "unknown"),
             benchmark_git_sha=os.getenv("BENCHMARK_GIT_SHA", "unknown"),
         )
@@ -196,6 +205,8 @@ def write_manifest(contract: JobContract, command: Sequence[str]) -> Path:
             "requested_dataset_dir": str(contract.requested_dataset_dir),
         },
         "prompt_version": PROMPT_VERSION,
+        "request_max_tokens": CANONICAL_MAX_TOKENS,
+        "request_timeout_seconds": CANONICAL_TIMEOUT_SECONDS,
         "vllm_command": list(command),
         "precision": "bfloat16",
         "quantization": None,
@@ -632,10 +643,16 @@ def verify_one_dataset(save_dir: Path, dataset: str) -> dict[str, Any]:
     for record_path in records[:10]:
         with record_path.open("r", encoding="utf-8") as file:
             record = json.load(file)
-        if record.get("status") != "success" or not isinstance(record.get("raw_response"), str):
+        if record.get("status") not in {"success", "model_failure"}:
             raise RuntimeError(f"Invalid raw record: {record_path}")
-        if record.get("finish_reason") == "length":
-            raise RuntimeError(f"Truncated raw record: {record_path}")
+        if record.get("status") == "success" and not isinstance(
+            record.get("raw_response"), str
+        ):
+            raise RuntimeError(f"Successful raw response is missing: {record_path}")
+        if record.get("status") == "model_failure" and record.get(
+            "failure_type"
+        ) not in {"timeout", "max_tokens", "invalid_response"}:
+            raise RuntimeError(f"Unclassified terminal model failure: {record_path}")
     visualizations = sorted((save_dir / dataset / "visualizations").glob("*.jpg"))
     if len(visualizations) < min(10, int(summary["image_count"])):
         raise RuntimeError("Ten smoke visualizations were not produced.")
@@ -933,26 +950,69 @@ def verify_full_result(contract: JobContract, save_dir: Path) -> dict[str, Any]:
         "scored_dataset_count": contract.expected_datasets,
         "macro_AP": aggregate.get("macro_AP"),
         "macro_AP50": aggregate.get("macro_AP50"),
+        "model_failure_count": aggregate.get("model_failure_count", 0),
+        "model_failure_counts": aggregate.get("model_failure_counts", {}),
     }
 
 
 def run_full(contract: JobContract, dataset_root: Path, root_store: GCSArtifactStore) -> None:
     gate_summary_path = contract.work_dir / "preflight_gate_summary.json"
-    download(
-        f"{contract.gcs_run_uri}/control/preflight/gate_summary.json",
-        gate_summary_path,
-    )
-    with gate_summary_path.open("r", encoding="utf-8") as file:
-        gate_summary = json.load(file)
-    if gate_summary.get("status") != "awaiting_human_visual_review":
-        raise RuntimeError("The expected successful automated preflight summary is missing.")
-    if (
-        gate_summary.get("automated_gates", {}).get(
-            "early_download_one_image_inference"
+    gate_summary_uri = f"{contract.gcs_run_uri}/control/preflight/gate_summary.json"
+    if exists(gate_summary_uri):
+        download(gate_summary_uri, gate_summary_path)
+        with gate_summary_path.open("r", encoding="utf-8") as file:
+            gate_summary = json.load(file)
+        if gate_summary.get("status") != "awaiting_human_visual_review":
+            raise RuntimeError(
+                "The expected successful automated preflight summary is missing."
+            )
+        if (
+            gate_summary.get("automated_gates", {}).get(
+                "early_download_one_image_inference"
+            )
+            != "passed"
+        ):
+            raise RuntimeError("The early-download Cosmos inference gate is missing.")
+    elif contract.allow_incomplete_preflight:
+        early_smoke_path = contract.work_dir / "early_download_smoke_for_full.json"
+        early_smoke_uri = (
+            f"{contract.gcs_run_uri}/control/preflight/early_download_smoke.json"
         )
-        != "passed"
-    ):
-        raise RuntimeError("The early-download Cosmos inference gate is missing.")
+        download(early_smoke_uri, early_smoke_path)
+        with early_smoke_path.open("r", encoding="utf-8") as file:
+            early_smoke = json.load(file)
+        if early_smoke.get("status") != "passed":
+            raise RuntimeError(
+                "The explicit preflight override still requires a successful real "
+                "one-image Cosmos inference."
+            )
+        override_path = contract.work_dir / "preflight_override.json"
+        atomic_write_json(
+            override_path,
+            {
+                "schema_version": 1,
+                "status": "explicitly_approved_with_incomplete_smoke",
+                "created_at": utc_now(),
+                "reason": (
+                    "The long smoke request exposed runaway autoregressive output. "
+                    "The user explicitly approved the full benchmark with an 8192-token "
+                    "ceiling, a 180-second per-image timeout, and model-side failures "
+                    "stored as terminal records with any complete detections salvaged."
+                ),
+                "required_evidence": {
+                    "early_download_smoke": early_smoke_uri,
+                    "dataset_and_storage_preflight": (
+                        f"{contract.gcs_preflight_storage_uri}/preflight_report.json"
+                    ),
+                    "partial_live_smoke": contract.gcs_smoke_uri,
+                },
+            },
+        )
+        root_store.upload_file(
+            override_path, "control/full/preflight_override.json"
+        )
+    else:
+        raise RuntimeError("The expected successful automated preflight summary is missing.")
 
     report_path = contract.work_dir / "cosmos_preflight_report.json"
     download(

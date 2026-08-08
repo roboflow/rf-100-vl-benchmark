@@ -33,7 +33,8 @@ launch)
     REGISTRY_AUTH=${RUNPOD_REGISTRY_AUTH_ID:-}
     MODEL_REVISION=2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2
     CUDA_VERSIONS=${RUNPOD_CUDA_VERSIONS:-12.8,12.9,13.0}
-    SPOT=false DRY_RUN=0 PREFLIGHT_APPROVED=0 ALLOW_ADDITIONAL_POD=0
+    SPOT=false DRY_RUN=0 PREFLIGHT_APPROVED=0 ALLOW_INCOMPLETE_PREFLIGHT=0
+    ALLOW_ADDITIONAL_POD=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --name) NAME=$2; shift 2 ;;
@@ -51,6 +52,7 @@ launch)
             --cuda) CUDA_VERSIONS=$2; shift 2 ;;
             --spot) SPOT=true; shift ;;
             --preflight-approved) PREFLIGHT_APPROVED=1; shift ;;
+            --allow-incomplete-preflight) ALLOW_INCOMPLETE_PREFLIGHT=1; shift ;;
             --allow-additional-pod) ALLOW_ADDITIONAL_POD=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
             *) echo "ERROR: unknown flag $1" >&2; exit 1 ;;
@@ -98,6 +100,11 @@ launch)
         echo "ERROR: --preflight-approved is meaningful only for --stage full." >&2
         exit 1
     fi
+    if [ "${ALLOW_INCOMPLETE_PREFLIGHT}" = "1" ] && \
+       { [ "${STAGE}" != "full" ] || [ "${PREFLIGHT_APPROVED}" != "1" ]; }; then
+        echo "ERROR: --allow-incomplete-preflight requires an approved full run." >&2
+        exit 1
+    fi
 
     BODY=$(NAME="${NAME}" IMAGE="${IMAGE}" STAGE="${STAGE}" \
         GCS_RUN_URI="${GCS_RUN_URI}" DATASET_GCS_URI="${DATASET_GCS_URI}" \
@@ -105,7 +112,8 @@ launch)
         GPU_COUNT="${GPU_COUNT}" DISK_GB="${DISK_GB}" VOLUME_GB="${VOLUME_GB}" \
         REGISTRY_AUTH="${REGISTRY_AUTH}" MODEL_REVISION="${MODEL_REVISION}" \
         CUDA_VERSIONS="${CUDA_VERSIONS}" SPOT="${SPOT}" \
-        PREFLIGHT_APPROVED="${PREFLIGHT_APPROVED}" python3 - <<'PY'
+        PREFLIGHT_APPROVED="${PREFLIGHT_APPROVED}" \
+        ALLOW_INCOMPLETE_PREFLIGHT="${ALLOW_INCOMPLETE_PREFLIGHT}" python3 - <<'PY'
 import json
 import os
 
@@ -118,6 +126,7 @@ env = {
     "COSMOS_WORKERS": "1",
     "COSMOS_IMAGE_REF": os.environ["IMAGE"],
     "COSMOS_PREFLIGHT_APPROVED": os.environ["PREFLIGHT_APPROVED"],
+    "COSMOS_ALLOW_INCOMPLETE_PREFLIGHT": os.environ["ALLOW_INCOMPLETE_PREFLIGHT"],
     "COSMOS_WORK_DIR": "/workspace/cosmos-runpod-work",
     "RF100VL_DIR": "/workspace/rf100-vl",
     "HF_HOME": "/workspace/huggingface",

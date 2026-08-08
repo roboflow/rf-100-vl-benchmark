@@ -52,9 +52,11 @@ checkpoints.
 vLLM is explicitly limited to a 0.80 GPU-memory reservation. This prevents its
 KV cache from making a healthy server look out-of-memory in RunPod monitoring;
 it does not change BF16 weights or inference quality. The canonical request cap
-is 100,000 generated tokens within the pinned 131,072-token combined context,
-with sufficient reserved input capacity for the configured maximum-size image
-and RF100VL class prompt.
+is 8,192 generated tokens with a 180-second per-image timeout. Token-capped,
+timed-out, and irrecoverably malformed model responses are durably classified
+rather than leaving datasets incomplete. Complete, explicitly encoded boxes are
+salvaged from a malformed or truncated tail; otherwise the image contributes
+zero detections.
 
 ## Build the image
 
