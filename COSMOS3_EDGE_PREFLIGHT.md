@@ -6,8 +6,9 @@ version, worker count, dataset copy, and GCS credentials intended for the full
 benchmark.
 
 On RunPod these gates are automated by the image's `preflight` stage. It
-uploads a gate summary and self-terminates before the mandatory human visual
-review. The separately approved `full` stage consumes that evidence; see
+uploads a gate summary and stops while preserving `/workspace` before the
+mandatory human visual review. The separately approved `full` stage consumes
+that evidence; see
 [`COSMOS3_EDGE_RUNPOD.md`](COSMOS3_EDGE_RUNPOD.md).
 
 ## Gate 1: offline contracts
@@ -70,7 +71,9 @@ python preflight_cosmos.py \
 
 This opens and verifies every test image, checks its actual pixel dimensions
 against COCO metadata, validates every category/image/annotation reference and
-ground-truth bbox, confirms exactly 100 test datasets, confirms that the live
+ground-truth bbox, and reports any zero-area boxes without mutating or removing
+them so scoring uses the same canonical COCO ground truth as other models. It
+confirms exactly 100 test datasets, confirms that the live
 endpoint advertises `nvidia/Cosmos3-Edge`, repeats the real GCS storage
 contract, and uploads `preflight_report.json` to the supplied GCS prefix. The
 report must say `status: passed`.

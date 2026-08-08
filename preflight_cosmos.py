@@ -93,6 +93,7 @@ def validate_dataset(dataset_directory: Path) -> dict[str, Any]:
         image_dimensions[image_id] = (width, height)
 
     annotation_ids: set[int | str] = set()
+    degenerate_annotation_count = 0
     for index, annotation in enumerate(annotations):
         annotation_id = annotation.get("id", f"index-{index}")
         if annotation_id in annotation_ids:
@@ -132,8 +133,8 @@ def validate_dataset(dataset_directory: Path) -> dict[str, Any]:
         if (
             x < -tolerance
             or y < -tolerance
-            or width <= 0
-            or height <= 0
+            or width < 0
+            or height < 0
             or x + width > image_width + tolerance
             or y + height > image_height + tolerance
         ):
@@ -141,6 +142,13 @@ def validate_dataset(dataset_directory: Path) -> dict[str, Any]:
                 f"{annotation_path}: annotation {annotation_id!r} bbox {bbox} "
                 f"is outside image {(image_width, image_height)}."
             )
+        # RF100VL's canonical COCO export currently contains a small number of
+        # zero-area ground-truth boxes. Keep the source annotation unchanged so
+        # Cosmos is scored against exactly the same COCO data as other models,
+        # but make the condition explicit in the preflight report. Negative or
+        # out-of-image boxes remain fatal above.
+        if width == 0 or height == 0:
+            degenerate_annotation_count += 1
 
     return {
         "dataset": dataset_directory.name,
@@ -148,6 +156,7 @@ def validate_dataset(dataset_directory: Path) -> dict[str, Any]:
         "category_count": len(categories),
         "image_count": len(images),
         "annotation_count": len(annotations),
+        "degenerate_annotation_count": degenerate_annotation_count,
     }
 
 
@@ -164,6 +173,9 @@ def validate_dataset_root(root: Path, expected_datasets: int) -> dict[str, Any]:
         "dataset_count": len(datasets),
         "image_count": sum(item["image_count"] for item in datasets),
         "annotation_count": sum(item["annotation_count"] for item in datasets),
+        "degenerate_annotation_count": sum(
+            item["degenerate_annotation_count"] for item in datasets
+        ),
         "datasets": datasets,
     }
 

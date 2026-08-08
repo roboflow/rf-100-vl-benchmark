@@ -69,6 +69,14 @@ launch)
         echo "ERROR: the canonical benchmark is single-GPU; use --gpus 1." >&2
         exit 1
     fi
+    if ! [[ "${DISK_GB}" =~ ^[0-9]+$ ]] || [ "${DISK_GB}" -lt 100 ]; then
+        echo "ERROR: the Cosmos image requires --disk of at least 100 GB." >&2
+        exit 1
+    fi
+    if ! [[ "${VOLUME_GB}" =~ ^[0-9]+$ ]] || [ "${VOLUME_GB}" -lt 200 ]; then
+        echo "ERROR: RF100VL, model cache, and results require --volume-size of at least 200 GB." >&2
+        exit 1
+    fi
     if ! [[ "${GCS_RUN_URI}" =~ ^gs://[^/]+/.+ ]]; then
         echo "ERROR: --gcs-run-uri must be a run-specific gs://bucket/prefix." >&2
         exit 1
@@ -116,6 +124,7 @@ env = {
     "HF_HUB_CACHE": "/workspace/huggingface/hub",
     "HF_XET_HIGH_PERFORMANCE": "1",
     "RUNPOD_TERMINATE_ON_EXIT": "1",
+    "RUNPOD_STOP_ON_EXIT": "1",
     "HF_TOKEN": "{{ RUNPOD_SECRET_HF_TOKEN }}",
     "GCP_SA_JSON_B64": "{{ RUNPOD_SECRET_GCP_SA_JSON_B64 }}",
     "RUNPOD_API_KEY": "{{ RUNPOD_SECRET_POD_API_KEY }}",

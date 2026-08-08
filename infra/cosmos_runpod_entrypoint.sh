@@ -41,10 +41,20 @@ cleanup() {
         --source "${exit_record}" \
         --relative-path "control/${COSMOS_STAGE:-unknown}/job_exit.json"
 
-    if [ -n "${RUNPOD_POD_ID:-}" ] && [ -n "${RUNPOD_API_KEY:-}" ] && \
-       [ "${RUNPOD_TERMINATE_ON_EXIT:-1}" = "1" ]; then
-        echo "[entrypoint] workload exited rc=${rc}; self-terminating pod"
-        "${EVAL_PYTHON}" infra/runpod_self_terminate.py "${RUNPOD_POD_ID}"
+    if [ -n "${RUNPOD_POD_ID:-}" ] && [ -n "${RUNPOD_API_KEY:-}" ]; then
+        # Preserve the volume after preflight (for the human gate and full-run
+        # reuse) and after every failure. Only a verified successful full run
+        # may delete its pod after all durable artifacts have reached GCS.
+        if [ "${rc}" -eq 0 ] && [ "${COSMOS_STAGE:-}" = "full" ] && \
+           [ "${RUNPOD_TERMINATE_ON_EXIT:-1}" = "1" ]; then
+            echo "[entrypoint] verified full workload succeeded; terminating pod"
+            "${EVAL_PYTHON}" infra/runpod_self_terminate.py \
+                "${RUNPOD_POD_ID}" terminate
+        elif [ "${RUNPOD_STOP_ON_EXIT:-1}" = "1" ]; then
+            echo "[entrypoint] workload exited rc=${rc}; stopping pod to preserve volume"
+            "${EVAL_PYTHON}" infra/runpod_self_terminate.py \
+                "${RUNPOD_POD_ID}" stop
+        fi
     fi
     exit "${rc}"
 }

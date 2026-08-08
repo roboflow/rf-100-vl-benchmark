@@ -23,6 +23,7 @@ from run_cosmos_job import (
     vllm_command,
 )
 import write_job_exit
+import runpod_self_terminate
 
 
 def contract_environment(**overrides: str) -> dict[str, str]:
@@ -128,6 +129,44 @@ class GCSPathTests(unittest.TestCase):
                     parse_uri(value)
 
 
+class PodCleanupTests(unittest.TestCase):
+    def test_stop_preserves_pod_and_uses_post(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        with (
+            mock.patch.dict(
+                os.environ, {"RUNPOD_API_KEY": "secret"}, clear=True
+            ),
+            mock.patch.object(
+                sys, "argv", ["runpod_self_terminate.py", "pod-1", "stop"]
+            ),
+            mock.patch("urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            self.assertEqual(runpod_self_terminate.main(), 0)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods/pod-1/stop")
+        self.assertEqual(request.method, "POST")
+
+    def test_terminate_deletes_pod_only_when_requested(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        with (
+            mock.patch.dict(
+                os.environ, {"RUNPOD_API_KEY": "secret"}, clear=True
+            ),
+            mock.patch.object(
+                sys,
+                "argv",
+                ["runpod_self_terminate.py", "pod-1", "terminate"],
+            ),
+            mock.patch("urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            self.assertEqual(runpod_self_terminate.main(), 0)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://rest.runpod.io/v1/pods/pod-1")
+        self.assertEqual(request.method, "DELETE")
+
+
 class LauncherDryRunTests(unittest.TestCase):
     def run_launcher(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
@@ -162,7 +201,31 @@ class LauncherDryRunTests(unittest.TestCase):
         self.assertIn("{{ RUNPOD_SECRET_ROBOFLOW_API_KEY }}", result.stdout)
         self.assertNotIn("not-a-real-secret", result.stdout + result.stderr)
         self.assertIn('"gpuCount": 1', result.stdout)
+        self.assertIn('"containerDiskInGb": 100', result.stdout)
+        self.assertIn('"volumeInGb": 200', result.stdout)
+        self.assertIn('"volumeMountPath": "/workspace"', result.stdout)
         self.assertIn('"COSMOS_WORKERS": "1"', result.stdout)
+        self.assertIn('"RUNPOD_STOP_ON_EXIT": "1"', result.stdout)
+
+    def test_undersized_disks_are_rejected(self):
+        common = (
+            "--name",
+            "cosmos-preflight",
+            "--image",
+            "registry/image:test",
+            "--stage",
+            "preflight",
+            "--gcs-run-uri",
+            "gs://bucket/runs/run-1",
+        )
+        for size_args, message in (
+            (("--disk", "99"), "at least 100 GB"),
+            (("--volume-size", "199"), "at least 200 GB"),
+        ):
+            with self.subTest(size_args=size_args):
+                result = self.run_launcher(*common, *size_args, "--dry-run")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
     def test_dataset_gcs_source_omits_roboflow_secret_reference(self):
         result = self.run_launcher(

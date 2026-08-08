@@ -9,7 +9,7 @@ The same immutable image has two stages:
 1. `preflight`: starts the pinned BF16 vLLM server, obtains RF100VL, runs the
    offline and real-GCS tests, validates all 100 test splits, runs the 10-image
    inference and GCS-only resume checks, scores one complete dataset, uploads
-   all evidence, and self-terminates.
+   all evidence, and stops while preserving its volume for review/reuse.
 2. `full`: only after human review of the ten overlays/raw responses, restores
    the preflight evidence, revalidates its exact data/model/prompt contract,
    evaluates all 100 test splits, verifies 100/100 scored plus the durable GCS
@@ -38,6 +38,13 @@ The launcher references these existing RunPod secrets by name:
 - `GCP_SA_JSON_B64`
 - `ROBOFLOW_API_KEY` (omitted when `--dataset-gcs-uri` is used)
 - `POD_API_KEY` for self-termination
+
+The canonical pod specification allocates a 100 GB container disk and a 200 GB
+persistent volume mounted at `/workspace`. RF100VL, the Hugging Face cache, and
+all local work/results live on the persistent volume. The launcher rejects
+smaller values; these defaults leave substantial headroom over the roughly
+7 GB RF100VL download plus the model cache, extraction overhead, and result
+checkpoints.
 
 ## Build the image
 
@@ -93,8 +100,9 @@ bash infra/runpod_cosmos_launch.sh launch \
 ```
 
 After the scientific intent is approved, submit the same command without
-`--dry-run`. Save the returned pod ID. The pod self-terminates after success or
-failure; if it remains listed after the job log ends, terminate it manually.
+`--dry-run`. Save the returned pod ID. The pod stops after preflight success or
+failure so `/workspace` remains available for review, diagnosis, and full-run
+reuse. It must not be terminated until its durable artifacts are verified.
 
 The automated gate is successful only when
 `control/preflight/gate_summary.json` says

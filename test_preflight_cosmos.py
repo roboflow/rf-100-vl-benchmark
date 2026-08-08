@@ -124,6 +124,23 @@ class DatasetValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside image"):
                 validate_dataset(dataset)
 
+    def test_reports_zero_area_bbox_without_mutating_ground_truth(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = _write_dataset(Path(temporary), bbox=[2, 3, 0, 4])
+            annotation_path = dataset / "test" / "_annotations.coco.json"
+            before = annotation_path.read_bytes()
+            result = validate_dataset(dataset)
+            after = annotation_path.read_bytes()
+        self.assertEqual(result["annotation_count"], 1)
+        self.assertEqual(result["degenerate_annotation_count"], 1)
+        self.assertEqual(before, after)
+
+    def test_rejects_negative_bbox_extent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = _write_dataset(Path(temporary), bbox=[2, 3, -1, 4])
+            with self.assertRaisesRegex(ValueError, "outside image"):
+                validate_dataset(dataset)
+
     def test_preflight_report_is_bound_to_annotation_endpoint_prompt_and_bucket(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
