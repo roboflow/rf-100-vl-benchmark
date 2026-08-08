@@ -11,6 +11,16 @@ mandatory human visual review. The separately approved `full` stage consumes
 that evidence; see
 [`COSMOS3_EDGE_RUNPOD.md`](COSMOS3_EDGE_RUNPOD.md).
 
+Before Gate 1, the RunPod wrapper also performs an early-failure check. vLLM
+startup and RF100VL acquisition run concurrently. The wrapper waits only for
+one test dataset to become complete, validates every one of its references and
+pixel dimensions twice for stability, then runs one image through Cosmos and
+uploads its raw record, summary, overlay, and control evidence below
+`preflight/early-download-smoke/`. The remaining datasets continue downloading
+in the acquisition subprocess. An inference, truncation, format, coordinate-
+diagnostic, visualization, or GCS failure stops acquisition immediately while
+preserving `/workspace` for a later resume.
+
 ## Gate 1: offline contracts
 
 Install the benchmark dependencies and run the complete offline suite:

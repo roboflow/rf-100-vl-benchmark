@@ -32,9 +32,11 @@ from evaluate_cosmos import (  # noqa: E402
     discover_datasets,
     parse_gcs_uri,
     resolve_annotation_file,
+    resolve_image_path,
     sha256_file,
 )
-from gcs_io import download, download_prefix, exists  # noqa: E402
+from gcs_io import download, exists  # noqa: E402
+from preflight_cosmos import validate_dataset  # noqa: E402
 
 
 PINNED_MODEL_REVISION = "2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2"
@@ -122,6 +124,10 @@ class JobContract:
     @property
     def gcs_smoke_uri(self) -> str:
         return f"{self.gcs_run_uri}/preflight/live-smoke"
+
+    @property
+    def gcs_early_smoke_uri(self) -> str:
+        return f"{self.gcs_run_uri}/preflight/early-download-smoke"
 
     @property
     def gcs_full_uri(self) -> str:
@@ -242,13 +248,27 @@ def find_complete_dataset_root(root: Path, expected: int) -> Path | None:
     return None
 
 
-def ensure_dataset(contract: JobContract) -> Path:
+@dataclass
+class DatasetAcquisition:
+    """A resumable RF100VL acquisition that may run beside live inference."""
+
+    requested_root: Path
+    expected_datasets: int
+    process: subprocess.Popen[Any] | None = None
+    resolved_root: Path | None = None
+
+
+def start_dataset_acquisition(contract: JobContract) -> DatasetAcquisition:
     existing = find_complete_dataset_root(
         contract.requested_dataset_dir, contract.expected_datasets
     )
     if existing:
         print(f"[data] found all {contract.expected_datasets} datasets at {existing}")
-        return existing
+        return DatasetAcquisition(
+            requested_root=contract.requested_dataset_dir,
+            expected_datasets=contract.expected_datasets,
+            resolved_root=existing,
+        )
 
     root = contract.requested_dataset_dir
     root.mkdir(parents=True, exist_ok=True)
@@ -256,34 +276,200 @@ def ensure_dataset(contract: JobContract) -> Path:
         print("[data] partial RF100VL download found; resuming with overwrite enabled")
     if contract.dataset_gcs_uri:
         print(f"[data] restoring RF100VL from {contract.dataset_gcs_uri}")
-        restored = download_prefix(contract.dataset_gcs_uri, root)
-        print(f"[data] restored {restored} objects")
+        command = [
+            sys.executable,
+            "infra/gcs_io.py",
+            "download-prefix",
+            "--uri",
+            contract.dataset_gcs_uri,
+            "--destination",
+            str(root),
+        ]
     else:
         if not os.getenv("ROBOFLOW_API_KEY"):
             raise RuntimeError(
                 "RF100VL is absent and neither RF100VL_GCS_URI nor the "
                 "ROBOFLOW_API_KEY RunPod secret is available."
             )
-        run_command(
-            [
-                sys.executable,
-                "infra/download_rf100vl.py",
-                "--output-dir",
-                str(root),
-            ]
-        )
+        command = [
+            sys.executable,
+            "infra/download_rf100vl.py",
+            "--output-dir",
+            str(root),
+        ]
 
-    resolved = find_complete_dataset_root(root, contract.expected_datasets)
+    print("[data] starting asynchronous acquisition:", " ".join(command), flush=True)
+    process = subprocess.Popen(command, cwd=ROOT)
+    return DatasetAcquisition(
+        requested_root=root,
+        expected_datasets=contract.expected_datasets,
+        process=process,
+    )
+
+
+def finish_dataset_acquisition(acquisition: DatasetAcquisition) -> Path:
+    if acquisition.resolved_root is not None:
+        return acquisition.resolved_root
+    if acquisition.process is None:
+        raise RuntimeError("Dataset acquisition has no process or resolved root.")
+    return_code = acquisition.process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, acquisition.process.args)
+
+    resolved = find_complete_dataset_root(
+        acquisition.requested_root, acquisition.expected_datasets
+    )
     if not resolved:
-        count = len(discover_datasets(root, None)) if root.is_dir() else 0
-        raise RuntimeError(
-            f"Expected {contract.expected_datasets} RF100VL test datasets after download; found {count}."
+        count = (
+            len(discover_datasets(acquisition.requested_root, None))
+            if acquisition.requested_root.is_dir()
+            else 0
         )
+        raise RuntimeError(
+            f"Expected {acquisition.expected_datasets} RF100VL test datasets "
+            f"after download; found {count}."
+        )
+    acquisition.resolved_root = resolved
     return resolved
 
 
+def stop_dataset_acquisition(acquisition: DatasetAcquisition | None) -> None:
+    """Stop a still-running download when an earlier model gate has failed."""
+
+    if acquisition is None or acquisition.process is None:
+        return
+    if acquisition.process.poll() is not None:
+        return
+    print("[data] stopping acquisition after an earlier job failure", flush=True)
+    acquisition.process.terminate()
+    try:
+        acquisition.process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        acquisition.process.kill()
+        acquisition.process.wait(timeout=10)
+
+
+def ensure_dataset(contract: JobContract) -> Path:
+    """Synchronous compatibility wrapper used by tests and manual callers."""
+
+    acquisition = start_dataset_acquisition(contract)
+    try:
+        return finish_dataset_acquisition(acquisition)
+    except BaseException:
+        stop_dataset_acquisition(acquisition)
+        raise
+
+
+def candidate_dataset_directories(root: Path) -> list[Path]:
+    """Find test-split directories that may be complete during acquisition."""
+
+    roots = (root, root / "rf100vl", root / "rf100-vl", root / "RF100VL")
+    candidates: set[Path] = set()
+    for candidate_root in roots:
+        if not candidate_root.is_dir():
+            continue
+        if (candidate_root / "test").is_dir():
+            candidates.add(candidate_root)
+            continue
+        candidates.update(
+            path for path in candidate_root.iterdir() if (path / "test").is_dir()
+        )
+    return sorted(candidates)
+
+
+def find_first_ready_dataset(root: Path) -> tuple[Path, dict[str, Any]] | None:
+    """Return the first test split that is complete and passes full validation."""
+
+    for dataset in candidate_dataset_directories(root):
+        try:
+            validation = validate_dataset(dataset)
+        except Exception:
+            # A directory and its annotation file can appear before the package
+            # has finished writing all referenced images. It is not ready yet.
+            continue
+        return dataset, validation
+    return None
+
+
+def dataset_readiness_signature(dataset: Path) -> tuple[tuple[str, int, int], ...]:
+    """Capture sizes/mtimes so inference never races files still being written."""
+
+    test_dir = dataset / "test"
+    annotation_path = resolve_annotation_file(test_dir)
+    with annotation_path.open("r", encoding="utf-8") as file:
+        coco = json.load(file)
+    paths = [annotation_path]
+    paths.extend(
+        resolve_image_path(test_dir, str(image["file_name"]))
+        for image in coco.get("images", [])
+    )
+    signature = []
+    for path in paths:
+        stat = path.stat()
+        signature.append(
+            (str(path.relative_to(dataset)), stat.st_size, stat.st_mtime_ns)
+        )
+    return tuple(sorted(signature))
+
+
+def wait_for_first_ready_dataset(
+    acquisition: DatasetAcquisition,
+    *,
+    stability_seconds: float = 2.0,
+) -> tuple[Path, dict[str, Any]]:
+    """Wait for one stable, valid dataset without waiting for all 100."""
+
+    while True:
+        ready = find_first_ready_dataset(acquisition.requested_root)
+        if ready is not None:
+            dataset, first_validation = ready
+            try:
+                first_signature = dataset_readiness_signature(dataset)
+            except Exception:
+                time.sleep(1)
+                continue
+            if stability_seconds:
+                time.sleep(stability_seconds)
+            try:
+                second_validation = validate_dataset(dataset)
+                second_signature = dataset_readiness_signature(dataset)
+            except Exception:
+                # The downloader was still moving this test split into place.
+                time.sleep(1)
+                continue
+            if (
+                second_validation == first_validation
+                and second_signature == first_signature
+            ):
+                print(
+                    f"[data] first stable dataset is ready for early inference: "
+                    f"{dataset.name} ({second_validation['image_count']} test images)",
+                    flush=True,
+                )
+                return dataset, second_validation
+
+        process = acquisition.process
+        if process is None:
+            raise RuntimeError("No complete RF100VL dataset is available for early smoke.")
+        return_code = process.poll()
+        if return_code is not None:
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, process.args)
+            resolved = finish_dataset_acquisition(acquisition)
+            ready = find_first_ready_dataset(resolved)
+            if ready is None:
+                raise RuntimeError(
+                    "RF100VL acquisition completed without one valid test dataset."
+                )
+            return ready
+        time.sleep(2)
+
+
 def wait_for_server(
-    process: subprocess.Popen[Any], expected_model_id: str, timeout_seconds: int = 1800
+    process: subprocess.Popen[Any],
+    expected_model_id: str,
+    timeout_seconds: int = 1800,
+    acquisition: DatasetAcquisition | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     url = f"{BASE_URL}/models"
@@ -291,6 +477,15 @@ def wait_for_server(
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"vLLM exited during startup with code {process.returncode}.")
+        if (
+            acquisition is not None
+            and acquisition.process is not None
+            and acquisition.process.poll() not in (None, 0)
+        ):
+            raise RuntimeError(
+                "RF100VL acquisition failed while vLLM was starting with code "
+                f"{acquisition.process.returncode}."
+            )
         try:
             with urllib.request.urlopen(url, timeout=5) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -449,7 +644,118 @@ def verify_one_dataset(save_dir: Path, dataset: str) -> dict[str, Any]:
     }
 
 
+def verify_early_download_smoke(save_dir: Path, dataset: str) -> dict[str, Any]:
+    """Require one durable, non-truncated inference and its visualization."""
+
+    dataset_dir = save_dir / dataset
+    records = sorted((dataset_dir / "records").rglob("*.json"))
+    if len(records) != 1:
+        raise RuntimeError(
+            f"Early download smoke expected one raw record, found {len(records)}."
+        )
+    with records[0].open("r", encoding="utf-8") as file:
+        record = json.load(file)
+    if record.get("status") != "success":
+        raise RuntimeError(f"Early download smoke record failed: {records[0]}")
+    if not isinstance(record.get("raw_response"), str):
+        raise RuntimeError("Early download smoke did not preserve the raw response.")
+    if record.get("finish_reason") == "length":
+        raise RuntimeError("Early download smoke response was token-truncated.")
+    diagnostics = record.get("diagnostics", {})
+    anomaly_keys = (
+        "invalid_boxes",
+        "duplicate_boxes",
+        "clamped_boxes",
+        "reordered_axes",
+    )
+    anomalies = {key: int(diagnostics.get(key, 0)) for key in anomaly_keys}
+    anomalies["ignored_label_count"] = len(diagnostics.get("ignored_labels", []))
+    if any(anomalies.values()):
+        raise RuntimeError(
+            f"Early download smoke diagnostics require investigation: {anomalies}"
+        )
+
+    visualizations = sorted((dataset_dir / "visualizations").glob("*.jpg"))
+    if len(visualizations) != 1:
+        raise RuntimeError(
+            f"Early download smoke expected one visualization, found {len(visualizations)}."
+        )
+    summary_path = dataset_dir / "summary.json"
+    with summary_path.open("r", encoding="utf-8") as file:
+        summary = json.load(file)
+    if summary.get("completed_image_count") != 1 or summary.get("new_error_count") != 0:
+        raise RuntimeError("Early download smoke summary does not report one success.")
+    return {
+        "dataset": dataset,
+        "summary_path": str(summary_path),
+        "raw_record_path": str(records[0]),
+        "visualization_path": str(visualizations[0]),
+        "finish_reason": record.get("finish_reason"),
+        "diagnostics": anomalies,
+    }
+
+
+def run_early_download_smoke(
+    contract: JobContract,
+    dataset: Path,
+    validation: dict[str, Any],
+    root_store: GCSArtifactStore,
+) -> None:
+    """Try Cosmos as soon as one dataset is ready while acquisition continues."""
+
+    save_dir = contract.work_dir / "early-download-smoke"
+    print(
+        f"[early-smoke] running one image from {dataset.name} before requiring all "
+        f"{contract.expected_datasets} datasets",
+        flush=True,
+    )
+    run_command(
+        evaluator_command(
+            contract,
+            dataset.parent,
+            save_dir,
+            contract.gcs_early_smoke_uri,
+            dataset=dataset.name,
+            max_images=1,
+            visualize_limit=1,
+        )
+    )
+    verification = verify_early_download_smoke(save_dir, dataset.name)
+    verification.update(
+        {
+            "schema_version": 1,
+            "status": "passed",
+            "created_at": utc_now(),
+            "dataset_validation": validation,
+            "gcs_raw_record_uri": (
+                f"{contract.gcs_early_smoke_uri}/"
+                f"{Path(verification['raw_record_path']).relative_to(save_dir).as_posix()}"
+            ),
+            "gcs_visualization_uri": (
+                f"{contract.gcs_early_smoke_uri}/"
+                f"{Path(verification['visualization_path']).relative_to(save_dir).as_posix()}"
+            ),
+        }
+    )
+    verification_path = contract.work_dir / "early_download_smoke.json"
+    atomic_write_json(verification_path, verification)
+    root_store.upload_file(
+        verification_path, "control/preflight/early_download_smoke.json"
+    )
+    print(
+        "[early-smoke] one real Cosmos inference passed and is durable in GCS; "
+        "continuing acquisition",
+        flush=True,
+    )
+
+
 def run_preflight(contract: JobContract, dataset_root: Path, root_store: GCSArtifactStore) -> None:
+    early_smoke_path = contract.work_dir / "early_download_smoke.json"
+    with early_smoke_path.open("r", encoding="utf-8") as file:
+        early_smoke = json.load(file)
+    if early_smoke.get("status") != "passed":
+        raise RuntimeError("The early-download Cosmos inference gate did not pass.")
+
     run_command(
         [
             sys.executable,
@@ -552,6 +858,7 @@ def run_preflight(contract: JobContract, dataset_root: Path, root_store: GCSArti
         f"{contract.gcs_smoke_uri}/{Path(path).relative_to(restored_dir).as_posix()}"
         for path in verification["raw_record_paths"]
     ]
+    verification["early_download_smoke"] = early_smoke
     gate_summary_path = contract.work_dir / "preflight_gate_summary.json"
     atomic_write_json(
         gate_summary_path,
@@ -561,6 +868,7 @@ def run_preflight(contract: JobContract, dataset_root: Path, root_store: GCSArti
             "created_at": utc_now(),
             "dataset": smoke_dataset,
             "automated_gates": {
+                "early_download_one_image_inference": "passed",
                 "offline_contracts": "passed",
                 "real_gcs_round_trip": "passed",
                 "all_100_dataset_validation": "passed",
@@ -575,6 +883,10 @@ def run_preflight(contract: JobContract, dataset_root: Path, root_store: GCSArti
                 "coordinate alignment, allowed labels, truncation, and thinking text."
             ),
             "gcs": {
+                "early_download_smoke": (
+                    f"{contract.gcs_run_uri}/control/preflight/"
+                    "early_download_smoke.json"
+                ),
                 "preflight_report": (
                     f"{contract.gcs_preflight_storage_uri}/preflight_report.json"
                 ),
@@ -631,6 +943,13 @@ def run_full(contract: JobContract, dataset_root: Path, root_store: GCSArtifactS
         gate_summary = json.load(file)
     if gate_summary.get("status") != "awaiting_human_visual_review":
         raise RuntimeError("The expected successful automated preflight summary is missing.")
+    if (
+        gate_summary.get("automated_gates", {}).get(
+            "early_download_one_image_inference"
+        )
+        != "passed"
+    ):
+        raise RuntimeError("The early-download Cosmos inference gate is missing.")
 
     report_path = contract.work_dir / "cosmos_preflight_report.json"
     download(
@@ -664,6 +983,7 @@ def main() -> int:
     root_store.upload_file(manifest_path, f"control/{contract.stage}/job_manifest.json")
 
     vllm_log_path = contract.work_dir / f"vllm-{contract.stage}.log"
+    acquisition: DatasetAcquisition | None = None
     try:
         with vllm_log_path.open("ab") as vllm_log:
             print("[vllm] starting pinned BF16 server")
@@ -671,14 +991,25 @@ def main() -> int:
                 command, cwd=ROOT, stdout=vllm_log, stderr=subprocess.STDOUT
             )
             try:
-                # Dataset acquisition overlaps model download/startup.
-                dataset_root = ensure_dataset(contract)
-                wait_for_server(process, contract.model_id)
+                # Dataset acquisition overlaps model download/startup. During
+                # preflight, one stable test split is enough to exercise the
+                # live model before acquisition of all 100 datasets completes.
+                acquisition = start_dataset_acquisition(contract)
+                wait_for_server(
+                    process, contract.model_id, acquisition=acquisition
+                )
+                if contract.stage == "preflight":
+                    early_dataset, validation = wait_for_first_ready_dataset(acquisition)
+                    run_early_download_smoke(
+                        contract, early_dataset, validation, root_store
+                    )
+                dataset_root = finish_dataset_acquisition(acquisition)
                 if contract.stage == "preflight":
                     run_preflight(contract, dataset_root, root_store)
                 else:
                     run_full(contract, dataset_root, root_store)
             finally:
+                stop_dataset_acquisition(acquisition)
                 if process.poll() is None:
                     process.terminate()
                     try:

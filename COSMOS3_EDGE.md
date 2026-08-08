@@ -79,17 +79,20 @@ Do not begin the 100-dataset run until every gate in
 [`COSMOS3_EDGE_PREFLIGHT.md`](COSMOS3_EDGE_PREFLIGHT.md) passes. The short
 version is:
 
-1. Run all offline prompt, request, parser, coordinate, scoring, GCS-resume,
+1. Run one real Cosmos image as soon as the first stable, fully validated test
+   dataset is ready; vLLM startup and RF100VL acquisition run concurrently and
+   the raw record plus overlay are uploaded to GCS.
+2. Run all offline prompt, request, parser, coordinate, scoring, GCS-resume,
    truncation, full-100-dummy-dataset, and GCS-failure tests.
-2. Run the opt-in test against the real GCS bucket and pod credentials.
-3. Validate all 100 test annotation files, every referenced image and its pixel
+3. Run the opt-in test against the real GCS bucket and pod credentials.
+4. Validate all 100 test annotation files, every referenced image and its pixel
    dimensions, every category mapping, the live endpoint's model identity, and
    real GCS create/update/list/read/restore/delete operations with
    `preflight_cosmos.py`.
-4. Run ten real Cosmos images with visualizations, review raw JSON and box
+5. Run ten real Cosmos images with visualizations, review raw JSON and box
    overlays, then repeat from a fresh local output directory using the same GCS
    prefix and confirm all ten records are restored with zero new requests.
-5. Complete and score one entire RF100VL test dataset before approving the full
+6. Complete and score one entire RF100VL test dataset before approving the full
    run.
 
 NVIDIA's current [Cosmos3-Edge model card](https://huggingface.co/nvidia/Cosmos3-Edge)

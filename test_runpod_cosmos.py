@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "infra"))
 from gcs_io import parse_uri
 import download_rf100vl
 from run_cosmos_job import (
+    DatasetAcquisition,
     GPU_MEMORY_UTILIZATION,
     JobContract,
     MAX_IMAGE_PIXELS,
@@ -25,7 +26,15 @@ from run_cosmos_job import (
     VISION_SPATIAL_MERGE_SIZE,
     evaluator_command,
     ensure_dataset,
+    find_first_ready_dataset,
+    main as run_job_main,
+    run_early_download_smoke,
     select_smoke_dataset,
+    start_dataset_acquisition,
+    stop_dataset_acquisition,
+    verify_early_download_smoke,
+    wait_for_server,
+    wait_for_first_ready_dataset,
     vllm_command,
 )
 import write_job_exit
@@ -362,11 +371,324 @@ class RuntimeHelperTests(unittest.TestCase):
             )
             with (
                 mock.patch("run_cosmos_job.run_command") as run_command,
-                mock.patch("run_cosmos_job.download_prefix") as download_prefix,
+                mock.patch("run_cosmos_job.subprocess.Popen") as popen,
             ):
                 self.assertEqual(ensure_dataset(contract), dataset_root)
             run_command.assert_not_called()
-            download_prefix.assert_not_called()
+            popen.assert_not_called()
+
+    @staticmethod
+    def write_downloaded_dataset(root: Path, name: str, *, write_image: bool) -> Path:
+        from PIL import Image
+
+        dataset = root / name
+        test_dir = dataset / "test"
+        test_dir.mkdir(parents=True)
+        if write_image:
+            Image.new("RGB", (20, 10), color="white").save(test_dir / "one.png")
+        payload = {
+            "images": [
+                {
+                    "id": 1,
+                    "file_name": "one.png",
+                    "width": 20,
+                    "height": 10,
+                }
+            ],
+            "annotations": [
+                {
+                    "id": 1,
+                    "image_id": 1,
+                    "category_id": 1,
+                    "bbox": [0, 0, 20, 10],
+                }
+            ],
+            "categories": [{"id": 1, "name": "object"}],
+        }
+        (test_dir / "_annotations.coco.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return dataset
+
+    def test_first_ready_dataset_skips_a_partial_download(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_downloaded_dataset(root, "dataset-a-partial", write_image=False)
+            complete = self.write_downloaded_dataset(
+                root, "dataset-b-complete", write_image=True
+            )
+            ready = find_first_ready_dataset(root)
+            self.assertIsNotNone(ready)
+            self.assertEqual(ready[0], complete)
+            self.assertEqual(ready[1]["image_count"], 1)
+
+    def test_wait_for_first_dataset_does_not_wait_for_acquisition_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            complete = self.write_downloaded_dataset(
+                root, "dataset-ready", write_image=True
+            )
+            process = mock.MagicMock()
+            process.poll.return_value = None
+            acquisition = DatasetAcquisition(root, 100, process=process)
+            dataset, validation = wait_for_first_ready_dataset(
+                acquisition, stability_seconds=0
+            )
+            self.assertEqual(dataset, complete)
+            self.assertEqual(validation["image_count"], 1)
+            process.wait.assert_not_called()
+
+    def test_first_dataset_must_have_a_stable_file_signature(self):
+        dataset = Path("/data/dataset-ready")
+        validation = {"image_count": 1}
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        acquisition = DatasetAcquisition(Path("/data"), 100, process=process)
+        with (
+            mock.patch(
+                "run_cosmos_job.find_first_ready_dataset",
+                return_value=(dataset, validation),
+            ),
+            mock.patch("run_cosmos_job.validate_dataset", return_value=validation),
+            mock.patch(
+                "run_cosmos_job.dataset_readiness_signature",
+                side_effect=(("first",), ("changing",), ("stable",), ("stable",)),
+            ),
+            mock.patch("run_cosmos_job.time.sleep"),
+        ):
+            selected, selected_validation = wait_for_first_ready_dataset(
+                acquisition, stability_seconds=0
+            )
+        self.assertEqual(selected, dataset)
+        self.assertEqual(selected_validation, validation)
+
+    def test_stops_in_progress_acquisition_after_an_early_failure(self):
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        acquisition = DatasetAcquisition(Path("/data"), 100, process=process)
+        stop_dataset_acquisition(acquisition)
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=30)
+
+    def test_dataset_failure_interrupts_model_startup_wait(self):
+        model_process = mock.MagicMock()
+        model_process.poll.return_value = None
+        failed_download = mock.MagicMock()
+        failed_download.poll.return_value = 7
+        failed_download.returncode = 7
+        acquisition = DatasetAcquisition(
+            Path("/data"), 100, process=failed_download
+        )
+        with self.assertRaisesRegex(RuntimeError, "acquisition failed.*code 7"):
+            wait_for_server(
+                model_process,
+                "nvidia/Cosmos3-Edge",
+                acquisition=acquisition,
+            )
+
+    def test_package_acquisition_starts_asynchronously(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            contract = types.SimpleNamespace(
+                requested_dataset_dir=root,
+                expected_datasets=100,
+                dataset_gcs_uri=None,
+            )
+            process = mock.MagicMock()
+            with (
+                mock.patch.dict(os.environ, {"ROBOFLOW_API_KEY": "secret"}),
+                mock.patch("run_cosmos_job.subprocess.Popen", return_value=process) as popen,
+            ):
+                acquisition = start_dataset_acquisition(contract)
+            self.assertIs(acquisition.process, process)
+            popen.assert_called_once()
+            command = popen.call_args.args[0]
+            self.assertIn("infra/download_rf100vl.py", command)
+            process.wait.assert_not_called()
+
+    def test_early_smoke_verification_requires_one_clean_record_and_overlay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            save_dir = Path(temporary)
+            dataset_dir = save_dir / "dataset-ready"
+            records = dataset_dir / "records"
+            visualizations = dataset_dir / "visualizations"
+            records.mkdir(parents=True)
+            visualizations.mkdir()
+            (records / "1.json").write_text(
+                json.dumps(
+                    {
+                        "status": "success",
+                        "raw_response": "[]",
+                        "finish_reason": "stop",
+                        "diagnostics": {
+                            "invalid_boxes": 0,
+                            "duplicate_boxes": 0,
+                            "clamped_boxes": 0,
+                            "reordered_axes": 0,
+                            "ignored_labels": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (visualizations / "1.jpg").write_bytes(b"test")
+            (dataset_dir / "summary.json").write_text(
+                json.dumps({"completed_image_count": 1, "new_error_count": 0}),
+                encoding="utf-8",
+            )
+            verified = verify_early_download_smoke(save_dir, "dataset-ready")
+            self.assertEqual(verified["finish_reason"], "stop")
+            self.assertEqual(verified["diagnostics"]["ignored_label_count"], 0)
+
+    def test_early_smoke_uses_one_image_and_uploads_control_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = self.write_downloaded_dataset(
+                root / "rf100-vl", "dataset-ready", write_image=True
+            )
+            contract = JobContract(
+                stage="preflight",
+                gcs_run_uri="gs://bucket/run",
+                work_dir=root / "work",
+                requested_dataset_dir=root / "rf100-vl",
+                model_id="nvidia/Cosmos3-Edge",
+                model_revision=PINNED_MODEL_REVISION,
+                expected_datasets=100,
+                workers=1,
+                smoke_dataset=None,
+                dataset_gcs_uri=None,
+                preflight_approved=False,
+                image_ref="registry/image@sha256:" + "a" * 64,
+                benchmark_git_sha="test-sha",
+            )
+            store = mock.MagicMock()
+
+            def fake_evaluator(command):
+                self.assertEqual(command[command.index("--max-images") + 1], "1")
+                self.assertEqual(command[command.index("--visualize-limit") + 1], "1")
+                self.assertEqual(
+                    command[command.index("--gcs-results-uri") + 1],
+                    contract.gcs_early_smoke_uri,
+                )
+                save_dir = Path(command[command.index("--save-dir") + 1])
+                result_dir = save_dir / dataset.name
+                (result_dir / "records").mkdir(parents=True)
+                (result_dir / "visualizations").mkdir()
+                (result_dir / "records" / "1.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "success",
+                            "raw_response": "[]",
+                            "finish_reason": "stop",
+                            "diagnostics": {"ignored_labels": []},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (result_dir / "visualizations" / "1.jpg").write_bytes(b"test")
+                (result_dir / "summary.json").write_text(
+                    json.dumps({"completed_image_count": 1, "new_error_count": 0}),
+                    encoding="utf-8",
+                )
+
+            with mock.patch("run_cosmos_job.run_command", side_effect=fake_evaluator):
+                run_early_download_smoke(
+                    contract,
+                    dataset,
+                    {"dataset": dataset.name, "image_count": 1},
+                    store,
+                )
+
+            evidence_path = contract.work_dir / "early_download_smoke.json"
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "passed")
+            self.assertTrue(evidence["gcs_raw_record_uri"].startswith("gs://bucket/run/"))
+            store.upload_file.assert_called_once_with(
+                evidence_path, "control/preflight/early_download_smoke.json"
+            )
+
+    def test_job_runs_early_smoke_before_waiting_for_all_datasets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = self.write_downloaded_dataset(
+                root / "rf100-vl", "dataset-ready", write_image=True
+            )
+            contract = JobContract(
+                stage="preflight",
+                gcs_run_uri="gs://bucket/run",
+                work_dir=root / "work",
+                requested_dataset_dir=root / "rf100-vl",
+                model_id="nvidia/Cosmos3-Edge",
+                model_revision=PINNED_MODEL_REVISION,
+                expected_datasets=100,
+                workers=1,
+                smoke_dataset=None,
+                dataset_gcs_uri=None,
+                preflight_approved=False,
+                image_ref="registry/image@sha256:" + "a" * 64,
+                benchmark_git_sha="test-sha",
+            )
+            acquisition = DatasetAcquisition(
+                contract.requested_dataset_dir,
+                100,
+                process=mock.MagicMock(),
+            )
+            model_process = mock.MagicMock()
+            model_process.poll.return_value = 0
+            manifest = root / "manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+            events = []
+
+            with (
+                mock.patch("run_cosmos_job.JobContract.from_environment", return_value=contract),
+                mock.patch("run_cosmos_job.GCSArtifactStore") as store_type,
+                mock.patch("run_cosmos_job.vllm_command", return_value=["vllm"]),
+                mock.patch("run_cosmos_job.write_manifest", return_value=manifest),
+                mock.patch("run_cosmos_job.subprocess.Popen", return_value=model_process),
+                mock.patch(
+                    "run_cosmos_job.start_dataset_acquisition",
+                    side_effect=lambda unused: events.append("acquisition-started") or acquisition,
+                ),
+                mock.patch(
+                    "run_cosmos_job.wait_for_server",
+                    side_effect=lambda *unused, **unused_kwargs: events.append(
+                        "server-ready"
+                    ),
+                ),
+                mock.patch(
+                    "run_cosmos_job.wait_for_first_ready_dataset",
+                    side_effect=lambda unused: events.append("first-dataset-ready")
+                    or (dataset, {"image_count": 1}),
+                ),
+                mock.patch(
+                    "run_cosmos_job.run_early_download_smoke",
+                    side_effect=lambda *unused: events.append("early-smoke"),
+                ),
+                mock.patch(
+                    "run_cosmos_job.finish_dataset_acquisition",
+                    side_effect=lambda unused: events.append("all-datasets-ready")
+                    or contract.requested_dataset_dir,
+                ),
+                mock.patch(
+                    "run_cosmos_job.run_preflight",
+                    side_effect=lambda *unused: events.append("regular-preflight"),
+                ),
+                mock.patch("run_cosmos_job.stop_dataset_acquisition"),
+            ):
+                store_type.return_value.verify_access.return_value = None
+                self.assertEqual(run_job_main(), 0)
+
+            self.assertEqual(
+                events,
+                [
+                    "acquisition-started",
+                    "server-ready",
+                    "first-dataset-ready",
+                    "early-smoke",
+                    "all-datasets-ready",
+                    "regular-preflight",
+                ],
+            )
 
     def test_downloader_uses_package_api_and_canonical_coco_format(self):
         calls = []

@@ -6,10 +6,13 @@ specification, and submit or inspect pods.
 
 The same immutable image has two stages:
 
-1. `preflight`: starts the pinned BF16 vLLM server, obtains RF100VL, runs the
-   offline and real-GCS tests, validates all 100 test splits, runs the 10-image
-   inference and GCS-only resume checks, scores one complete dataset, uploads
-   all evidence, and stops while preserving its volume for review/reuse.
+1. `preflight`: starts the pinned BF16 vLLM server and RF100VL acquisition in
+   parallel. As soon as the first complete test dataset passes image/annotation
+   validation, it runs one real Cosmos image and uploads the raw response and
+   overlay to GCS while the remaining datasets continue downloading. It then
+   runs the offline and real-GCS tests, validates all 100 test splits, runs the
+   10-image inference and GCS-only resume checks, scores one complete dataset,
+   uploads all evidence, and stops while preserving its volume for review/reuse.
 2. `full`: only after human review of the ten overlays/raw responses, restores
    the preflight evidence, revalidates its exact data/model/prompt contract,
    evaluates all 100 test splits, verifies 100/100 scored plus the durable GCS
@@ -83,6 +86,7 @@ It contains independent prefixes:
 ```text
 control/preflight/             manifests, job/vLLM logs, gate summary
 preflight/storage/             preflight report and disposable GCS probes
+preflight/early-download-smoke/ first-ready-dataset raw record and overlay
 preflight/live-smoke/          ten-image raw records, overlays, resume evidence,
                                and one complete dataset score
 control/full/                  full job manifest, logs, verification
@@ -110,6 +114,12 @@ After the scientific intent is approved, submit the same command without
 `--dry-run`. Save the returned pod ID. The pod stops after preflight success or
 failure so `/workspace` remains available for review, diagnosis, and full-run
 reuse. It must not be terminated until its durable artifacts are verified.
+
+The early download smoke never reads a directory merely because it exists. It
+must contain a parseable COCO test annotation, every referenced test image must
+open successfully with matching dimensions, and the same validation result
+must remain stable before inference starts. A failed inference stops the
+downloader and pod early; the partial `/workspace` dataset remains resumable.
 
 The automated gate is successful only when
 `control/preflight/gate_summary.json` says
