@@ -23,6 +23,7 @@ RUN chmod +x infra/cosmos_runpod_entrypoint.sh && \
         "import importlib.metadata as m; from packaging.version import Version; assert Version(m.version('opencv-python-headless')) >= Version('4.13.0'); print('vllm=' + m.version('vllm'))" && \
     /opt/cosmos-eval/bin/python -m unittest -v \
         test_evaluate_cosmos.py \
+        test_cosmos_sharding.py \
         test_preflight_cosmos.py \
         test_runpod_cosmos.py
 

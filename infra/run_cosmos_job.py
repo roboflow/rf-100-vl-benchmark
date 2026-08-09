@@ -37,6 +37,12 @@ from evaluate_cosmos import (  # noqa: E402
 )
 from gcs_io import download, exists  # noqa: E402
 from preflight_cosmos import validate_dataset  # noqa: E402
+from cosmos_sharding import (  # noqa: E402
+    finalize_if_ready,
+    load_plan,
+    shard_by_id,
+    verify_shard_aggregate,
+)
 
 
 PINNED_MODEL_REVISION = "2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2"
@@ -75,12 +81,17 @@ class JobContract:
     allow_incomplete_preflight: bool
     image_ref: str
     benchmark_git_sha: str
+    shard_manifest_uri: str | None = None
+    shard_manifest_sha256: str | None = None
+    shard_id: str | None = None
 
     @classmethod
     def from_environment(cls) -> "JobContract":
         stage = os.getenv("COSMOS_STAGE", "").strip()
-        if stage not in {"preflight", "full"}:
-            raise ValueError("COSMOS_STAGE must be exactly 'preflight' or 'full'.")
+        if stage not in {"preflight", "full", "shard"}:
+            raise ValueError(
+                "COSMOS_STAGE must be exactly 'preflight', 'full', or 'shard'."
+            )
         gcs_run_uri = os.getenv("COSMOS_GCS_RUN_URI", "").rstrip("/")
         parse_gcs_uri(gcs_run_uri)
         model_revision = os.getenv(
@@ -98,14 +109,34 @@ class JobContract:
         allow_incomplete_preflight = env_truthy(
             "COSMOS_ALLOW_INCOMPLETE_PREFLIGHT"
         )
-        if stage == "full" and not preflight_approved:
+        if stage in {"full", "shard"} and not preflight_approved:
             raise ValueError(
-                "The full stage requires COSMOS_PREFLIGHT_APPROVED=1 after human visual review."
+                f"The {stage} stage requires COSMOS_PREFLIGHT_APPROVED=1 after "
+                "human visual review."
             )
-        if allow_incomplete_preflight and (stage != "full" or not preflight_approved):
+        if allow_incomplete_preflight and (
+            stage not in {"full", "shard"} or not preflight_approved
+        ):
             raise ValueError(
-                "COSMOS_ALLOW_INCOMPLETE_PREFLIGHT=1 requires an approved full stage."
+                "COSMOS_ALLOW_INCOMPLETE_PREFLIGHT=1 requires an approved full stage "
+                "or an approved shard continuation."
             )
+        shard_manifest_uri = os.getenv("COSMOS_SHARD_MANIFEST_URI") or None
+        shard_manifest_sha256 = os.getenv("COSMOS_SHARD_MANIFEST_SHA256") or None
+        shard_id = os.getenv("COSMOS_SHARD_ID") or None
+        if stage == "shard":
+            if not shard_manifest_uri or not shard_manifest_sha256 or not shard_id:
+                raise ValueError(
+                    "Shard stage requires COSMOS_SHARD_MANIFEST_URI, "
+                    "COSMOS_SHARD_MANIFEST_SHA256, and COSMOS_SHARD_ID."
+                )
+            parse_gcs_uri(shard_manifest_uri)
+            if not re.fullmatch(r"[0-9a-f]{64}", shard_manifest_sha256):
+                raise ValueError("COSMOS_SHARD_MANIFEST_SHA256 must be 64 lowercase hex characters.")
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", shard_id):
+                raise ValueError("COSMOS_SHARD_ID contains unsafe characters.")
+        elif shard_manifest_uri or shard_manifest_sha256 or shard_id:
+            raise ValueError("Shard environment variables are valid only for shard stage.")
         dataset_gcs_uri = os.getenv("RF100VL_GCS_URI") or None
         if dataset_gcs_uri:
             parse_gcs_uri(dataset_gcs_uri)
@@ -124,6 +155,9 @@ class JobContract:
             allow_incomplete_preflight=allow_incomplete_preflight,
             image_ref=os.getenv("COSMOS_IMAGE_REF", "unknown"),
             benchmark_git_sha=os.getenv("BENCHMARK_GIT_SHA", "unknown"),
+            shard_manifest_uri=shard_manifest_uri,
+            shard_manifest_sha256=shard_manifest_sha256,
+            shard_id=shard_id,
         )
 
     @property
@@ -141,6 +175,12 @@ class JobContract:
     @property
     def gcs_full_uri(self) -> str:
         return f"{self.gcs_run_uri}/full"
+
+    @property
+    def control_prefix(self) -> str:
+        if self.stage == "shard":
+            return f"control/shards/{self.shard_id}"
+        return f"control/{self.stage}"
 
 
 def run_command(command: Sequence[str], *, env: dict[str, str] | None = None) -> None:
@@ -546,10 +586,14 @@ def evaluator_command(
     gcs_uri: str,
     *,
     dataset: str | None = None,
+    datasets: Sequence[str] | None = None,
+    expected_datasets: int | None = None,
     max_images: int | None = None,
     visualize_limit: int = 0,
     preflight_report: Path | None = None,
 ) -> list[str]:
+    if dataset and datasets:
+        raise ValueError("Use either dataset or datasets, not both.")
     command = [
         sys.executable,
         "evaluate_cosmos.py",
@@ -577,6 +621,10 @@ def evaluator_command(
         # --option=value form so a leading hyphen cannot be mistaken for a new
         # command-line option.
         command.append(f"--dataset={dataset}")
+    if datasets:
+        if len(set(datasets)) != len(datasets):
+            raise ValueError("Evaluator dataset selection contains duplicates.")
+        command.extend(f"--dataset={name}" for name in datasets)
     if max_images is not None:
         command.extend(["--max-images", str(max_images)])
     if visualize_limit:
@@ -590,6 +638,8 @@ def evaluator_command(
                 str(preflight_report),
             ]
         )
+    elif expected_datasets is not None:
+        command.extend(["--expected-datasets", str(expected_datasets)])
     return command
 
 
@@ -1035,6 +1085,95 @@ def run_full(contract: JobContract, dataset_root: Path, root_store: GCSArtifactS
     print("[full] verified 100/100 datasets scored with durable GCS success marker.")
 
 
+def run_shard(
+    contract: JobContract, dataset_root: Path, root_store: GCSArtifactStore
+) -> None:
+    """Run one frozen, disjoint dataset shard and attempt final aggregation."""
+
+    if (
+        not contract.shard_manifest_uri
+        or not contract.shard_manifest_sha256
+        or not contract.shard_id
+    ):
+        raise ValueError("Shard contract is missing its manifest URI or shard ID.")
+    plan_path = contract.work_dir / "shard_plan.json"
+    download(contract.shard_manifest_uri, plan_path)
+    if sha256_file(plan_path) != contract.shard_manifest_sha256:
+        raise ValueError("Downloaded shard manifest SHA-256 does not match the launch contract.")
+    plan = load_plan(plan_path)
+    shard = shard_by_id(plan, contract.shard_id)
+    checks = {
+        "gcs_run_uri": (plan["gcs_run_uri"], contract.gcs_run_uri),
+        "model_id": (plan["model_id"], contract.model_id),
+        "model_revision": (plan["model_revision"], contract.model_revision),
+        "image_ref": (plan["image_ref"], contract.image_ref),
+        "benchmark_git_sha": (
+            plan["benchmark_git_sha"],
+            contract.benchmark_git_sha,
+        ),
+        "prompt_version": (plan["prompt_version"], PROMPT_VERSION),
+    }
+    for name, (planned, actual) in checks.items():
+        if planned != actual:
+            raise ValueError(
+                f"Shard plan {name} mismatch: planned {planned!r}, actual {actual!r}."
+            )
+
+    expected_by_name = {item["dataset"]: item for item in shard["datasets"]}
+    selected = discover_datasets(dataset_root, set(expected_by_name))
+    for dataset_directory in selected:
+        validation = validate_dataset(dataset_directory)
+        expected = expected_by_name[dataset_directory.name]
+        for key in ("annotation_sha256", "image_count", "annotation_count"):
+            if validation[key] != expected[key]:
+                raise ValueError(
+                    f"Shard input mismatch for {dataset_directory.name} {key}: "
+                    f"planned {expected[key]!r}, actual {validation[key]!r}."
+                )
+
+    save_dir = contract.work_dir / f"results-{contract.shard_id}"
+    command = evaluator_command(
+        contract,
+        dataset_root,
+        save_dir,
+        shard["gcs_uri"],
+        datasets=[item["dataset"] for item in shard["datasets"]],
+        expected_datasets=shard["dataset_count"],
+    )
+    run_command(command)
+    aggregate_path = save_dir / "aggregate_summary.json"
+    success_path = save_dir / "_SUCCESS.json"
+    if not aggregate_path.is_file() or not success_path.is_file():
+        raise RuntimeError(f"{contract.shard_id} did not produce local success artifacts.")
+    with aggregate_path.open("r", encoding="utf-8") as file:
+        aggregate = json.load(file)
+    verify_shard_aggregate(plan, contract.shard_id, aggregate)
+    if not exists(f"{shard['gcs_uri']}/_SUCCESS.json"):
+        raise RuntimeError(f"{contract.shard_id} GCS success marker is missing.")
+
+    verification = {
+        "schema_version": 1,
+        "status": "complete",
+        "verified_at": utc_now(),
+        "plan_id": plan["plan_id"],
+        "shard_id": contract.shard_id,
+        "gcs_uri": shard["gcs_uri"],
+        "dataset_count": shard["dataset_count"],
+        "image_count": shard["image_count"],
+    }
+    verification_path = contract.work_dir / f"{contract.shard_id}-verification.json"
+    atomic_write_json(verification_path, verification)
+    root_store.upload_file(
+        verification_path,
+        f"control/shards/{plan['plan_id']}/{contract.shard_id}/verification.json",
+    )
+    finalization = finalize_if_ready(plan)
+    print(
+        f"[shard] {contract.shard_id} verified; finalization={finalization['status']}",
+        flush=True,
+    )
+
+
 def main() -> int:
     contract = JobContract.from_environment()
     contract.work_dir.mkdir(parents=True, exist_ok=True)
@@ -1043,7 +1182,7 @@ def main() -> int:
 
     command = vllm_command(contract)
     manifest_path = write_manifest(contract, command)
-    root_store.upload_file(manifest_path, f"control/{contract.stage}/job_manifest.json")
+    root_store.upload_file(manifest_path, f"{contract.control_prefix}/job_manifest.json")
 
     vllm_log_path = contract.work_dir / f"vllm-{contract.stage}.log"
     acquisition: DatasetAcquisition | None = None
@@ -1069,8 +1208,10 @@ def main() -> int:
                 dataset_root = finish_dataset_acquisition(acquisition)
                 if contract.stage == "preflight":
                     run_preflight(contract, dataset_root, root_store)
-                else:
+                elif contract.stage == "full":
                     run_full(contract, dataset_root, root_store)
+                else:
+                    run_shard(contract, dataset_root, root_store)
             finally:
                 stop_dataset_acquisition(acquisition)
                 if process.poll() is None:
@@ -1083,7 +1224,7 @@ def main() -> int:
                 vllm_log.flush()
     finally:
         if vllm_log_path.is_file():
-            root_store.upload_file(vllm_log_path, f"control/{contract.stage}/vllm.log")
+            root_store.upload_file(vllm_log_path, f"{contract.control_prefix}/vllm.log")
     return 0
 
 

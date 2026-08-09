@@ -150,6 +150,49 @@ bash infra/runpod_cosmos_launch.sh launch \
 Obtain the separate exact-launch approval, then execute the emitted approved
 command without `--dry-run`. Do not reconstruct it manually after approval.
 
+## Safe dataset sharding
+
+`infra/cosmos_sharding.py` can freeze a running single-pod benchmark and split
+only its unfinished datasets across several pods. Do not launch multiple
+ordinary `full` jobs against the same `full/` prefix: their aggregate and log
+objects would collide and their dataset walks would overlap.
+
+The frozen plan contains every preflight annotation hash and image count, the
+completed baseline dataset set, an immutable container digest and Git SHA, and
+one exact assignment for every remaining dataset. The planner refuses missing,
+duplicated, overlapping, or metadata-mismatched assignments. Each shard writes
+to a separate `full-shards/<PLAN_ID>/<SHARD_ID>/` prefix.
+
+Before launch, copy any partial canonical dataset checkpoints into the one
+shard that owns that dataset. The evaluator restores those records and does not
+repeat their image requests. Pin the uploaded plan object in every launch with
+both `--shard-manifest-uri` and `--shard-manifest-sha256`.
+
+A successful shard verifies its exact dataset allowlist, input annotation
+hashes, image counts, local aggregate, and GCS success marker. The last shard to
+finish performs an idempotent finalization. It verifies all shard markers,
+requires one record per expected test image, requires each dataset's
+predictions, summary, and run configuration, copies shard-owned artifacts into
+the canonical `full/<dataset>/` layout, recomputes the 100-way macro metrics,
+and writes `full/_SUCCESS.json` last. Missing or duplicate data, copy failures,
+or an altered baseline leave the canonical success marker absent.
+
+Example shard dry run:
+
+```bash
+bash infra/runpod_cosmos_launch.sh launch \
+  --name cosmos-rf100vl-shard-00 \
+  --image "$IMMUTABLE_IMAGE" \
+  --stage shard \
+  --gcs-run-uri "$COSMOS_GCS_RUN_URI" \
+  --shard-manifest-uri "$SHARD_MANIFEST_URI" \
+  --shard-manifest-sha256 "$SHARD_MANIFEST_SHA256" \
+  --shard-id shard-00 \
+  --preflight-approved \
+  --allow-incomplete-preflight \
+  --dry-run
+```
+
 ## Completion contract
 
 The full run is complete only when all of the following agree:
@@ -159,8 +202,9 @@ The full run is complete only when all of the following agree:
 - selected, processed, and scored dataset counts are all exactly 100;
 - all 100 embedded dataset summaries are complete and contain COCO metrics;
 - `full/_SUCCESS.json` exists in GCS;
-- `control/full/verification.json` independently records the same 100/100
-  result.
+- `control/full/verification.json` for a single-pod run, or
+  `control/shards/<PLAN_ID>/final_verification.json` for a sharded continuation,
+  independently records the same 100/100 result and 14,237 image records.
 
 No hard time cutoff is used. Per-image records are uploaded immediately, so a
 replacement pod using the same GCS run root resumes durable progress.

@@ -29,6 +29,7 @@ command=${1:-help}
 case "${command}" in
 launch)
     NAME= IMAGE= STAGE= GCS_RUN_URI= DATASET_GCS_URI= SMOKE_DATASET=
+    SHARD_MANIFEST_URI= SHARD_MANIFEST_SHA256= SHARD_ID=
     GPU_TYPE="NVIDIA H100 80GB HBM3" GPU_COUNT=1 DISK_GB=100 VOLUME_GB=200
     REGISTRY_AUTH=${RUNPOD_REGISTRY_AUTH_ID:-}
     MODEL_REVISION=2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2
@@ -43,6 +44,9 @@ launch)
             --gcs-run-uri) GCS_RUN_URI=$2; shift 2 ;;
             --dataset-gcs-uri) DATASET_GCS_URI=$2; shift 2 ;;
             --smoke-dataset) SMOKE_DATASET=$2; shift 2 ;;
+            --shard-manifest-uri) SHARD_MANIFEST_URI=$2; shift 2 ;;
+            --shard-manifest-sha256) SHARD_MANIFEST_SHA256=$2; shift 2 ;;
+            --shard-id) SHARD_ID=$2; shift 2 ;;
             --gpu-type) GPU_TYPE=$2; shift 2 ;;
             --gpus) GPU_COUNT=$2; shift 2 ;;
             --disk) DISK_GB=$2; shift 2 ;;
@@ -60,11 +64,12 @@ launch)
     done
     : "${NAME:?--name is required}"
     : "${IMAGE:?--image is required}"
-    : "${STAGE:?--stage preflight|full is required}"
+    : "${STAGE:?--stage preflight|full|shard is required}"
     : "${GCS_RUN_URI:?--gcs-run-uri is required}"
     : "${REGISTRY_AUTH:?--registry-auth or RUNPOD_REGISTRY_AUTH_ID is required}"
-    if [ "${STAGE}" != "preflight" ] && [ "${STAGE}" != "full" ]; then
-        echo "ERROR: --stage must be preflight or full." >&2
+    if [ "${STAGE}" != "preflight" ] && [ "${STAGE}" != "full" ] && \
+       [ "${STAGE}" != "shard" ]; then
+        echo "ERROR: --stage must be preflight, full, or shard." >&2
         exit 1
     fi
     if [ "${GPU_COUNT}" != "1" ]; then
@@ -87,13 +92,13 @@ launch)
         echo "ERROR: --model-revision must be a full 40-character commit SHA." >&2
         exit 1
     fi
-    if [ "${STAGE}" = "full" ]; then
+    if [ "${STAGE}" = "full" ] || [ "${STAGE}" = "shard" ]; then
         if [ "${PREFLIGHT_APPROVED}" != "1" ]; then
-            echo "ERROR: full launch requires --preflight-approved after visual review." >&2
-            exit 1
+            echo "ERROR: ${STAGE} launch requires --preflight-approved after visual review." >&2
+        exit 1
         fi
         if ! [[ "${IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            echo "ERROR: full launch requires an immutable --image ...@sha256:DIGEST." >&2
+            echo "ERROR: ${STAGE} launch requires an immutable --image ...@sha256:DIGEST." >&2
             exit 1
         fi
     elif [ "${PREFLIGHT_APPROVED}" = "1" ]; then
@@ -101,14 +106,38 @@ launch)
         exit 1
     fi
     if [ "${ALLOW_INCOMPLETE_PREFLIGHT}" = "1" ] && \
-       { [ "${STAGE}" != "full" ] || [ "${PREFLIGHT_APPROVED}" != "1" ]; }; then
-        echo "ERROR: --allow-incomplete-preflight requires an approved full run." >&2
+       { { [ "${STAGE}" != "full" ] && [ "${STAGE}" != "shard" ]; } || \
+         [ "${PREFLIGHT_APPROVED}" != "1" ]; }; then
+        echo "ERROR: --allow-incomplete-preflight requires an approved full or shard run." >&2
+        exit 1
+    fi
+    if [ "${STAGE}" = "shard" ]; then
+        : "${SHARD_MANIFEST_URI:?--shard-manifest-uri is required for shard stage}"
+        : "${SHARD_MANIFEST_SHA256:?--shard-manifest-sha256 is required for shard stage}"
+        : "${SHARD_ID:?--shard-id is required for shard stage}"
+        if ! [[ "${SHARD_MANIFEST_URI}" =~ ^gs://[^/]+/.+ ]]; then
+            echo "ERROR: --shard-manifest-uri must be an exact gs:// object URI." >&2
+            exit 1
+        fi
+        if ! [[ "${SHARD_ID}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "ERROR: --shard-id contains unsafe characters." >&2
+            exit 1
+        fi
+        if ! [[ "${SHARD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: --shard-manifest-sha256 must be 64 lowercase hex characters." >&2
+            exit 1
+        fi
+    elif [ -n "${SHARD_MANIFEST_URI}" ] || [ -n "${SHARD_MANIFEST_SHA256}" ] || \
+         [ -n "${SHARD_ID}" ]; then
+        echo "ERROR: shard flags are valid only with --stage shard." >&2
         exit 1
     fi
 
     BODY=$(NAME="${NAME}" IMAGE="${IMAGE}" STAGE="${STAGE}" \
         GCS_RUN_URI="${GCS_RUN_URI}" DATASET_GCS_URI="${DATASET_GCS_URI}" \
         SMOKE_DATASET="${SMOKE_DATASET}" GPU_TYPE="${GPU_TYPE}" \
+        SHARD_MANIFEST_URI="${SHARD_MANIFEST_URI}" \
+        SHARD_MANIFEST_SHA256="${SHARD_MANIFEST_SHA256}" SHARD_ID="${SHARD_ID}" \
         GPU_COUNT="${GPU_COUNT}" DISK_GB="${DISK_GB}" VOLUME_GB="${VOLUME_GB}" \
         REGISTRY_AUTH="${REGISTRY_AUTH}" MODEL_REVISION="${MODEL_REVISION}" \
         CUDA_VERSIONS="${CUDA_VERSIONS}" SPOT="${SPOT}" \
@@ -144,6 +173,10 @@ else:
     env["ROBOFLOW_API_KEY"] = "{{ RUNPOD_SECRET_ROBOFLOW_API_KEY }}"
 if os.environ.get("SMOKE_DATASET"):
     env["COSMOS_SMOKE_DATASET"] = os.environ["SMOKE_DATASET"]
+if os.environ.get("SHARD_MANIFEST_URI"):
+    env["COSMOS_SHARD_MANIFEST_URI"] = os.environ["SHARD_MANIFEST_URI"]
+    env["COSMOS_SHARD_MANIFEST_SHA256"] = os.environ["SHARD_MANIFEST_SHA256"]
+    env["COSMOS_SHARD_ID"] = os.environ["SHARD_ID"]
 
 body = {
     "name": os.environ["NAME"],

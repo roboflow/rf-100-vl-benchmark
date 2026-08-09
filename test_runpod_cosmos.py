@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -31,6 +32,7 @@ from run_cosmos_job import (
     main as run_job_main,
     run_early_download_smoke,
     run_full,
+    run_shard,
     select_smoke_dataset,
     start_dataset_acquisition,
     stop_dataset_acquisition,
@@ -157,6 +159,58 @@ class JobContractTests(unittest.TestCase):
         self.assertNotIn("--dataset", command)
         self.assertEqual(parse_evaluator_args(command[2:]).datasets, ["-grccs"])
 
+    def test_shard_contract_requires_manifest_id_approval_and_exact_image(self):
+        environment = contract_environment(
+            COSMOS_STAGE="shard",
+            COSMOS_PREFLIGHT_APPROVED="1",
+            COSMOS_ALLOW_INCOMPLETE_PREFLIGHT="1",
+            COSMOS_SHARD_MANIFEST_URI="gs://bucket/run/control/shard-plan.json",
+            COSMOS_SHARD_MANIFEST_SHA256="c" * 64,
+            COSMOS_SHARD_ID="shard-03",
+            COSMOS_IMAGE_REF="registry/image@sha256:" + "a" * 64,
+            BENCHMARK_GIT_SHA="b" * 40,
+        )
+        with mock.patch.dict(os.environ, environment, clear=True):
+            contract = JobContract.from_environment()
+        self.assertEqual(contract.stage, "shard")
+        self.assertEqual(contract.shard_id, "shard-03")
+        self.assertEqual(contract.control_prefix, "control/shards/shard-03")
+
+        for missing in (
+            "COSMOS_SHARD_MANIFEST_URI",
+            "COSMOS_SHARD_MANIFEST_SHA256",
+            "COSMOS_SHARD_ID",
+        ):
+            invalid = dict(environment)
+            invalid.pop(missing)
+            with self.subTest(missing=missing):
+                with mock.patch.dict(os.environ, invalid, clear=True):
+                    with self.assertRaisesRegex(ValueError, "requires"):
+                        JobContract.from_environment()
+
+    def test_multi_dataset_shard_command_is_exact_and_duplicate_safe(self):
+        with mock.patch.dict(os.environ, contract_environment(), clear=True):
+            contract = JobContract.from_environment()
+        command = evaluator_command(
+            contract,
+            Path("/data"),
+            Path("/results"),
+            "gs://bucket/run/shard-00",
+            datasets=["-grccs", "dataset-b", "dataset-c"],
+            expected_datasets=3,
+        )
+        parsed = parse_evaluator_args(command[2:])
+        self.assertEqual(parsed.datasets, ["-grccs", "dataset-b", "dataset-c"])
+        self.assertEqual(parsed.expected_datasets, 3)
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            evaluator_command(
+                contract,
+                Path("/data"),
+                Path("/results"),
+                "gs://bucket/run/shard-00",
+                datasets=["same", "same"],
+            )
+
 
 class SmokeSelectionTests(unittest.TestCase):
     @staticmethod
@@ -240,6 +294,8 @@ class PodCleanupTests(unittest.TestCase):
             ("preflight", 7, "stop"),
             ("full", 0, "terminate"),
             ("full", 7, "stop"),
+            ("shard", 0, "terminate"),
+            ("shard", 7, "stop"),
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -389,8 +445,215 @@ class LauncherDryRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"COSMOS_ALLOW_INCOMPLETE_PREFLIGHT": "1"', result.stdout)
 
+    def test_shard_dry_run_has_isolated_identity_and_secret_references(self):
+        result = self.run_launcher(
+            "--name",
+            "cosmos-shard-02",
+            "--image",
+            "registry/image@sha256:" + "a" * 64,
+            "--stage",
+            "shard",
+            "--gcs-run-uri",
+            "gs://bucket/runs/run-1",
+            "--shard-manifest-uri",
+            "gs://bucket/runs/run-1/control/shards/plan.json",
+            "--shard-manifest-sha256",
+            "b" * 64,
+            "--shard-id",
+            "shard-02",
+            "--preflight-approved",
+            "--allow-incomplete-preflight",
+            "--dry-run",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"COSMOS_STAGE": "shard"', result.stdout)
+        self.assertIn('"COSMOS_SHARD_ID": "shard-02"', result.stdout)
+        self.assertIn('"COSMOS_SHARD_MANIFEST_URI":', result.stdout)
+        self.assertIn('"COSMOS_SHARD_MANIFEST_SHA256":', result.stdout)
+        self.assertIn("{{ RUNPOD_SECRET_GCP_SA_JSON_B64 }}", result.stdout)
+        self.assertNotIn("not-a-real-secret", result.stdout + result.stderr)
+
+    def test_shard_launch_rejects_missing_or_unsafe_identity(self):
+        common = (
+            "--name",
+            "cosmos-shard",
+            "--image",
+            "registry/image@sha256:" + "a" * 64,
+            "--stage",
+            "shard",
+            "--gcs-run-uri",
+            "gs://bucket/runs/run-1",
+            "--preflight-approved",
+            "--dry-run",
+        )
+        missing = self.run_launcher(*common)
+        self.assertNotEqual(missing.returncode, 0)
+        unsafe = self.run_launcher(
+            *common,
+            "--shard-manifest-uri",
+            "gs://bucket/run/plan.json",
+            "--shard-manifest-sha256",
+            "b" * 64,
+            "--shard-id",
+            "../bad",
+        )
+        self.assertNotEqual(unsafe.returncode, 0)
+
 
 class RuntimeHelperTests(unittest.TestCase):
+    def make_shard_contract(self, root: Path) -> JobContract:
+        return JobContract(
+            stage="shard",
+            gcs_run_uri="gs://bucket/run",
+            work_dir=root / "work",
+            requested_dataset_dir=root / "rf100-vl",
+            model_id="nvidia/Cosmos3-Edge",
+            model_revision=PINNED_MODEL_REVISION,
+            expected_datasets=100,
+            workers=1,
+            smoke_dataset=None,
+            dataset_gcs_uri=None,
+            preflight_approved=True,
+            allow_incomplete_preflight=True,
+            image_ref="registry/image@sha256:" + "a" * 64,
+            benchmark_git_sha="b" * 40,
+            shard_manifest_uri="gs://bucket/run/control/shards/plan.json",
+            shard_manifest_sha256=hashlib.sha256(b"{}").hexdigest(),
+            shard_id="shard-00",
+        )
+
+    def test_shard_runner_validates_inputs_writes_verification_and_finalizes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            contract = self.make_shard_contract(root)
+            contract.work_dir.mkdir(parents=True)
+            dataset_root = contract.requested_dataset_dir
+            selected = [dataset_root / "dataset-a", dataset_root / "dataset-b"]
+            for path in selected:
+                path.mkdir(parents=True)
+            metadata = [
+                {
+                    "dataset": "dataset-a",
+                    "annotation_sha256": "1" * 64,
+                    "image_count": 1,
+                    "annotation_count": 2,
+                },
+                {
+                    "dataset": "dataset-b",
+                    "annotation_sha256": "2" * 64,
+                    "image_count": 2,
+                    "annotation_count": 4,
+                },
+            ]
+            shard = {
+                "shard_id": "shard-00",
+                "gcs_uri": "gs://bucket/run/full-shards/plan/shard-00",
+                "dataset_count": 2,
+                "image_count": 3,
+                "datasets": metadata,
+            }
+            plan = {
+                "plan_id": "plan",
+                "gcs_run_uri": contract.gcs_run_uri,
+                "model_id": contract.model_id,
+                "model_revision": contract.model_revision,
+                "image_ref": contract.image_ref,
+                "benchmark_git_sha": contract.benchmark_git_sha,
+                "prompt_version": "cosmos3-edge-rf100-basic-v2",
+            }
+            aggregate = {
+                "status": "complete",
+                "selected_dataset_count": 2,
+                "processed_dataset_count": 2,
+                "scored_dataset_count": 2,
+                "datasets": [],
+            }
+            save_dir = contract.work_dir / "results-shard-00"
+
+            def fake_download(uri: str, destination: Path) -> None:
+                destination.write_text("{}", encoding="utf-8")
+
+            def fake_run(command) -> None:
+                save_dir.mkdir(parents=True)
+                (save_dir / "aggregate_summary.json").write_text(
+                    json.dumps(aggregate), encoding="utf-8"
+                )
+                (save_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
+
+            store = mock.MagicMock()
+            with (
+                mock.patch("run_cosmos_job.download", side_effect=fake_download),
+                mock.patch("run_cosmos_job.load_plan", return_value=plan),
+                mock.patch("run_cosmos_job.shard_by_id", return_value=shard),
+                mock.patch("run_cosmos_job.discover_datasets", return_value=selected),
+                mock.patch("run_cosmos_job.validate_dataset", side_effect=metadata),
+                mock.patch(
+                    "run_cosmos_job.evaluator_command", return_value=["evaluate-shard"]
+                ) as evaluator,
+                mock.patch("run_cosmos_job.run_command", side_effect=fake_run) as runner,
+                mock.patch("run_cosmos_job.verify_shard_aggregate") as verify,
+                mock.patch("run_cosmos_job.exists", return_value=True),
+                mock.patch(
+                    "run_cosmos_job.finalize_if_ready",
+                    return_value={"status": "waiting", "missing_shards": ["shard-01"]},
+                ) as finalize,
+            ):
+                run_shard(contract, dataset_root, store)
+            evaluator.assert_called_once()
+            runner.assert_called_once_with(["evaluate-shard"])
+            verify.assert_called_once_with(plan, "shard-00", aggregate)
+            finalize.assert_called_once_with(plan)
+            store.upload_file.assert_called_once()
+            self.assertTrue(str(store.upload_file.call_args.args[1]).endswith(
+                "/shard-00/verification.json"
+            ))
+
+    def test_shard_input_hash_mismatch_stops_before_inference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            contract = self.make_shard_contract(root)
+            contract.work_dir.mkdir(parents=True)
+            dataset = contract.requested_dataset_dir / "dataset-a"
+            dataset.mkdir(parents=True)
+            expected = {
+                "dataset": "dataset-a",
+                "annotation_sha256": "1" * 64,
+                "image_count": 1,
+                "annotation_count": 2,
+            }
+            shard = {
+                "shard_id": "shard-00",
+                "gcs_uri": "gs://bucket/run/shard-00",
+                "dataset_count": 1,
+                "image_count": 1,
+                "datasets": [expected],
+            }
+            plan = {
+                "plan_id": "plan",
+                "gcs_run_uri": contract.gcs_run_uri,
+                "model_id": contract.model_id,
+                "model_revision": contract.model_revision,
+                "image_ref": contract.image_ref,
+                "benchmark_git_sha": contract.benchmark_git_sha,
+                "prompt_version": "cosmos3-edge-rf100-basic-v2",
+            }
+            actual = {**expected, "annotation_sha256": "f" * 64}
+            with (
+                mock.patch("run_cosmos_job.download"),
+                mock.patch(
+                    "run_cosmos_job.sha256_file",
+                    return_value=contract.shard_manifest_sha256,
+                ),
+                mock.patch("run_cosmos_job.load_plan", return_value=plan),
+                mock.patch("run_cosmos_job.shard_by_id", return_value=shard),
+                mock.patch("run_cosmos_job.discover_datasets", return_value=[dataset]),
+                mock.patch("run_cosmos_job.validate_dataset", return_value=actual),
+                mock.patch("run_cosmos_job.run_command") as runner,
+                self.assertRaisesRegex(ValueError, "input mismatch"),
+            ):
+                run_shard(contract, contract.requested_dataset_dir, mock.MagicMock())
+            runner.assert_not_called()
+
     def test_approved_full_override_requires_early_smoke_and_records_audit_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

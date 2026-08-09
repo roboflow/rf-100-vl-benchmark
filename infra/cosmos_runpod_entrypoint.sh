@@ -32,22 +32,28 @@ cleanup() {
         --git-sha "${BENCHMARK_GIT_SHA:-unknown}" \
         --image-ref "${COSMOS_IMAGE_REF:-unknown}"
 
+    local control_prefix="control/${COSMOS_STAGE:-unknown}"
+    if [ "${COSMOS_STAGE:-}" = "shard" ] && [ -n "${COSMOS_SHARD_ID:-}" ]; then
+        control_prefix="control/shards/${COSMOS_SHARD_ID}"
+    fi
+
     "${EVAL_PYTHON}" infra/gcs_io.py upload-if-possible \
         --root-uri "${COSMOS_GCS_RUN_URI:-}" \
         --source "${JOB_LOG}" \
-        --relative-path "control/${COSMOS_STAGE:-unknown}/job.log"
+        --relative-path "${control_prefix}/job.log"
     "${EVAL_PYTHON}" infra/gcs_io.py upload-if-possible \
         --root-uri "${COSMOS_GCS_RUN_URI:-}" \
         --source "${exit_record}" \
-        --relative-path "control/${COSMOS_STAGE:-unknown}/job_exit.json"
+        --relative-path "${control_prefix}/job_exit.json"
 
     if [ -n "${RUNPOD_POD_ID:-}" ] && [ -n "${RUNPOD_API_KEY:-}" ]; then
         # Preserve the volume after preflight (for the human gate and full-run
         # reuse) and after every failure. Only a verified successful full run
         # may delete its pod after all durable artifacts have reached GCS.
-        if [ "${rc}" -eq 0 ] && [ "${COSMOS_STAGE:-}" = "full" ] && \
+        if [ "${rc}" -eq 0 ] && \
+           { [ "${COSMOS_STAGE:-}" = "full" ] || [ "${COSMOS_STAGE:-}" = "shard" ]; } && \
            [ "${RUNPOD_TERMINATE_ON_EXIT:-1}" = "1" ]; then
-            echo "[entrypoint] verified full workload succeeded; terminating pod"
+            echo "[entrypoint] verified ${COSMOS_STAGE} workload succeeded; terminating pod"
             "${EVAL_PYTHON}" infra/runpod_self_terminate.py \
                 "${RUNPOD_POD_ID}" terminate
         elif [ "${RUNPOD_STOP_ON_EXIT:-1}" = "1" ]; then
