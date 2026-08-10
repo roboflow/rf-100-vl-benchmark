@@ -106,6 +106,11 @@ class JobContractTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tensor-parallel-size") + 1], "4")
         self.assertEqual(command[command.index("--mm-encoder-tp-mode") + 1], "data")
         self.assertIn("--async-scheduling", command)
+        self.assertIn("--disable-custom-all-reduce", command)
+        self.assertEqual(
+            command[command.index("--compilation-config") + 1],
+            '{"pass_config":{"fuse_allreduce_rms":false}}',
+        )
         self.assertFalse(any("quant" in value for value in command))
 
     def test_super_contract_rejects_single_gpu_or_unknown_model(self):

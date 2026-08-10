@@ -266,6 +266,13 @@ def vllm_command(contract: JobContract) -> list[str]:
                 "--mm-encoder-tp-mode",
                 "data",
                 "--async-scheduling",
+                # This RunPod H100 topology cannot use vLLM's auto-selected
+                # FlashInfer MNNVL fused/custom all-reduce path: it crashes in
+                # custom_all_reduce.cuh during CUDA graph capture. PyNCCL is a
+                # quality-equivalent collective and preserves BF16 + graphs.
+                "--disable-custom-all-reduce",
+                "--compilation-config",
+                '{"pass_config":{"fuse_allreduce_rms":false}}',
             ]
         )
     return command

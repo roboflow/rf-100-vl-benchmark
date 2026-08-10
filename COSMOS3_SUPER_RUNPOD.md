@@ -13,6 +13,8 @@ dataset instructions, or README text.
 - serving surface: Cosmos3 Reasoner through vLLM's OpenAI-compatible API
 - weights: BF16, with no quantization
 - topology: four H100 80GB GPUs per server, tensor parallel size 4
+- collective: PyNCCL (`--disable-custom-all-reduce`) with the incompatible
+  FlashInfer fused all-reduce/RMS pass disabled
 - evaluator concurrency: one request at a time per server
 - request limits: 8,192 generated tokens and 180 seconds per image
 - scoring: the unchanged RF100VL COCO evaluator with `maxDets=500`
@@ -22,6 +24,12 @@ The detection prompt, media-first message layout, robust parser, normalized
 are identical to the completed Edge run. The inherited prompt identifier still
 contains `edge` because preserving it proves the prompt itself did not change;
 the run and every record identify the actual model as Cosmos3-Super.
+
+The standard collective is required because the vLLM Cosmos image otherwise
+auto-selects FlashInfer MNNVL fused/custom all-reduce on this RunPod H100
+topology and crashes during CUDA-graph capture. This setting changes only the
+multi-GPU communication implementation; it does not quantize or otherwise
+change the BF16 model, prompt, decoding settings, responses, or scoring.
 
 NVIDIA's maintained Reasoner recipe uses tensor parallel size 4 for Super.
 Eight independent one-H100 pods are therefore not a supported BF16 layout.
