@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the staged Cosmos3-Edge RF100VL benchmark inside one RunPod pod."""
+"""Run a staged Cosmos3 RF100VL benchmark inside one RunPod pod."""
 
 from __future__ import annotations
 
@@ -45,7 +45,16 @@ from cosmos_sharding import (  # noqa: E402
 )
 
 
-PINNED_MODEL_REVISION = "2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2"
+PINNED_MODEL_REVISIONS = {
+    "nvidia/Cosmos3-Edge": "2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2",
+    "nvidia/Cosmos3-Super": "e0262be9d8f7586bc24c069a2aed2b665bdff266",
+}
+# Backward-compatible alias used by the Edge-specific tests and run records.
+PINNED_MODEL_REVISION = PINNED_MODEL_REVISIONS["nvidia/Cosmos3-Edge"]
+DEFAULT_TENSOR_PARALLEL_SIZES = {
+    "nvidia/Cosmos3-Edge": 1,
+    "nvidia/Cosmos3-Super": 4,
+}
 BASE_URL = "http://127.0.0.1:8000/v1"
 GPU_MEMORY_UTILIZATION = 0.80
 MAX_MODEL_LENGTH = 131_072
@@ -84,6 +93,7 @@ class JobContract:
     shard_manifest_uri: str | None = None
     shard_manifest_sha256: str | None = None
     shard_id: str | None = None
+    tensor_parallel_size: int = 1
 
     @classmethod
     def from_environment(cls) -> "JobContract":
@@ -94,11 +104,31 @@ class JobContract:
             )
         gcs_run_uri = os.getenv("COSMOS_GCS_RUN_URI", "").rstrip("/")
         parse_gcs_uri(gcs_run_uri)
+        model_id = os.getenv("COSMOS_MODEL_ID", MODEL_ID).strip()
+        if model_id not in PINNED_MODEL_REVISIONS:
+            raise ValueError(
+                "COSMOS_MODEL_ID must be one of the explicitly supported Cosmos3 "
+                f"checkpoints: {sorted(PINNED_MODEL_REVISIONS)}."
+            )
         model_revision = os.getenv(
-            "COSMOS_MODEL_REVISION", PINNED_MODEL_REVISION
+            "COSMOS_MODEL_REVISION", PINNED_MODEL_REVISIONS[model_id]
         ).strip()
         if not re.fullmatch(r"[0-9a-f]{40}", model_revision):
             raise ValueError("COSMOS_MODEL_REVISION must be a full 40-character commit SHA.")
+        tensor_parallel_size = int(
+            os.getenv(
+                "COSMOS_TENSOR_PARALLEL_SIZE",
+                str(DEFAULT_TENSOR_PARALLEL_SIZES[model_id]),
+            )
+        )
+        allowed_tensor_parallel_sizes = (
+            {1} if model_id == "nvidia/Cosmos3-Edge" else {4, 8}
+        )
+        if tensor_parallel_size not in allowed_tensor_parallel_sizes:
+            raise ValueError(
+                f"{model_id} requires COSMOS_TENSOR_PARALLEL_SIZE in "
+                f"{sorted(allowed_tensor_parallel_sizes)} for this BF16 benchmark."
+            )
         expected_datasets = int(os.getenv("COSMOS_EXPECTED_DATASETS", "100"))
         workers = int(os.getenv("COSMOS_WORKERS", "1"))
         if expected_datasets != 100:
@@ -145,7 +175,7 @@ class JobContract:
             gcs_run_uri=gcs_run_uri,
             work_dir=Path(os.getenv("COSMOS_WORK_DIR", "/workspace/cosmos-runpod-work")),
             requested_dataset_dir=Path(os.getenv("RF100VL_DIR", "/workspace/rf100-vl")),
-            model_id=os.getenv("COSMOS_MODEL_ID", MODEL_ID),
+            model_id=model_id,
             model_revision=model_revision,
             expected_datasets=expected_datasets,
             workers=workers,
@@ -158,6 +188,7 @@ class JobContract:
             shard_manifest_uri=shard_manifest_uri,
             shard_manifest_sha256=shard_manifest_sha256,
             shard_id=shard_id,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
     @property
@@ -198,7 +229,7 @@ def output_or_unknown(command: Sequence[str]) -> str:
 
 
 def vllm_command(contract: JobContract) -> list[str]:
-    return [
+    command = [
         "/usr/local/bin/vllm",
         "serve",
         contract.model_id,
@@ -225,6 +256,19 @@ def vllm_command(contract: JobContract) -> list[str]:
         "--media-io-kwargs",
         '{"video":{"num_frames":256}}',
     ]
+    if contract.tensor_parallel_size > 1:
+        # NVIDIA's maintained Cosmos3-Super Reasoner configuration. Tensor
+        # parallelism changes placement, not the BF16 checkpoint weights.
+        command.extend(
+            [
+                "--tensor-parallel-size",
+                str(contract.tensor_parallel_size),
+                "--mm-encoder-tp-mode",
+                "data",
+                "--async-scheduling",
+            ]
+        )
+    return command
 
 
 def package_version(name: str) -> str:
@@ -252,6 +296,7 @@ def write_manifest(contract: JobContract, command: Sequence[str]) -> Path:
         "quantization": None,
         "kv_cache_dtype": "auto",
         "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
+        "tensor_parallel_size": contract.tensor_parallel_size,
         "python": sys.version,
         "packages": {
             name: package_version(name)

@@ -4,7 +4,7 @@ FROM ${VLLM_BASE_IMAGE}
 
 ARG BENCHMARK_GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=${BENCHMARK_GIT_SHA}
-LABEL org.opencontainers.image.title="Cosmos3-Edge RF100VL benchmark"
+LABEL org.opencontainers.image.title="Cosmos3 RF100VL benchmark"
 
 USER root
 WORKDIR /benchmark

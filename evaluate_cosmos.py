@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zero-shot RF100-VL object detection with NVIDIA Cosmos3-Edge.
+"""Zero-shot RF100-VL object detection with NVIDIA Cosmos3.
 
 This evaluator intentionally implements only the RF100-VL "basic" setting:
 each request contains one test image, the complete class list for that dataset,

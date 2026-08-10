@@ -24,6 +24,7 @@ from run_cosmos_job import (
     MAX_IMAGE_PIXELS,
     MAX_MODEL_LENGTH,
     PINNED_MODEL_REVISION,
+    PINNED_MODEL_REVISIONS,
     VISION_PATCH_SIZE,
     VISION_SPATIAL_MERGE_SIZE,
     evaluator_command,
@@ -89,6 +90,41 @@ class JobContractTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--revision") + 1], PINNED_MODEL_REVISION)
         self.assertFalse(any("quant" in value for value in command))
+
+    def test_super_contract_uses_pinned_bf16_four_gpu_reasoner(self):
+        environment = contract_environment(
+            COSMOS_MODEL_ID="nvidia/Cosmos3-Super",
+            COSMOS_MODEL_REVISION=PINNED_MODEL_REVISIONS["nvidia/Cosmos3-Super"],
+            COSMOS_TENSOR_PARALLEL_SIZE="4",
+        )
+        with mock.patch.dict(os.environ, environment, clear=True):
+            contract = JobContract.from_environment()
+        command = vllm_command(contract)
+        self.assertEqual(contract.model_id, "nvidia/Cosmos3-Super")
+        self.assertEqual(contract.tensor_parallel_size, 4)
+        self.assertEqual(command[command.index("--dtype") + 1], "bfloat16")
+        self.assertEqual(command[command.index("--tensor-parallel-size") + 1], "4")
+        self.assertEqual(command[command.index("--mm-encoder-tp-mode") + 1], "data")
+        self.assertIn("--async-scheduling", command)
+        self.assertFalse(any("quant" in value for value in command))
+
+    def test_super_contract_rejects_single_gpu_or_unknown_model(self):
+        for override in (
+            {
+                "COSMOS_MODEL_ID": "nvidia/Cosmos3-Super",
+                "COSMOS_MODEL_REVISION": PINNED_MODEL_REVISIONS[
+                    "nvidia/Cosmos3-Super"
+                ],
+                "COSMOS_TENSOR_PARALLEL_SIZE": "1",
+            },
+            {"COSMOS_MODEL_ID": "nvidia/not-cosmos"},
+        ):
+            with self.subTest(override=override):
+                with mock.patch.dict(
+                    os.environ, contract_environment(**override), clear=True
+                ):
+                    with self.assertRaises(ValueError):
+                        JobContract.from_environment()
 
     def test_full_contract_requires_explicit_visual_approval(self):
         environment = contract_environment(COSMOS_STAGE="full")
@@ -384,6 +420,49 @@ class LauncherDryRunTests(unittest.TestCase):
         self.assertIn('"volumeMountPath": "/workspace"', result.stdout)
         self.assertIn('"COSMOS_WORKERS": "1"', result.stdout)
         self.assertIn('"RUNPOD_STOP_ON_EXIT": "1"', result.stdout)
+
+    def test_super_preflight_dry_run_uses_four_h100s_and_safe_storage(self):
+        result = self.run_launcher(
+            "--name",
+            "cosmos3-super-preflight",
+            "--image",
+            "registry/image:test",
+            "--stage",
+            "preflight",
+            "--gcs-run-uri",
+            "gs://bucket/runs/super-1",
+            "--model-id",
+            "nvidia/Cosmos3-Super",
+            "--dry-run",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"COSMOS_MODEL_ID": "nvidia/Cosmos3-Super"', result.stdout)
+        self.assertIn('"COSMOS_TENSOR_PARALLEL_SIZE": "4"', result.stdout)
+        self.assertIn('"gpuCount": 4', result.stdout)
+        self.assertIn('"containerDiskInGb": 120', result.stdout)
+        self.assertIn('"volumeInGb": 400', result.stdout)
+        self.assertNotIn("not-a-real-secret", result.stdout + result.stderr)
+
+    def test_super_launcher_rejects_single_gpu_and_small_volume(self):
+        common = (
+            "--name",
+            "cosmos3-super-preflight",
+            "--image",
+            "registry/image:test",
+            "--stage",
+            "preflight",
+            "--gcs-run-uri",
+            "gs://bucket/runs/super-1",
+            "--model-id",
+            "nvidia/Cosmos3-Super",
+            "--dry-run",
+        )
+        result = self.run_launcher(*common, "--gpus", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must equal", result.stderr)
+        result = self.run_launcher(*common, "--volume-size", "299")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("at least 300 GB", result.stderr)
 
     def test_undersized_disks_are_rejected(self):
         common = (

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Submit and inspect staged Cosmos3-Edge RF100VL RunPod jobs.
+# Submit and inspect staged Cosmos3 RF100VL RunPod jobs.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -30,9 +30,9 @@ case "${command}" in
 launch)
     NAME= IMAGE= STAGE= GCS_RUN_URI= DATASET_GCS_URI= SMOKE_DATASET=
     SHARD_MANIFEST_URI= SHARD_MANIFEST_SHA256= SHARD_ID=
-    GPU_TYPE="NVIDIA H100 80GB HBM3" GPU_COUNT=1 DISK_GB=100 VOLUME_GB=200
+    GPU_TYPE="NVIDIA H100 80GB HBM3" GPU_COUNT= DISK_GB= VOLUME_GB=
     REGISTRY_AUTH=${RUNPOD_REGISTRY_AUTH_ID:-}
-    MODEL_REVISION=2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2
+    MODEL_ID=nvidia/Cosmos3-Edge MODEL_REVISION= TENSOR_PARALLEL_SIZE=
     CUDA_VERSIONS=${RUNPOD_CUDA_VERSIONS:-12.8,12.9,13.0}
     SPOT=false DRY_RUN=0 PREFLIGHT_APPROVED=0 ALLOW_INCOMPLETE_PREFLIGHT=0
     ALLOW_ADDITIONAL_POD=0
@@ -52,7 +52,9 @@ launch)
             --disk) DISK_GB=$2; shift 2 ;;
             --volume-size) VOLUME_GB=$2; shift 2 ;;
             --registry-auth) REGISTRY_AUTH=$2; shift 2 ;;
+            --model-id) MODEL_ID=$2; shift 2 ;;
             --model-revision) MODEL_REVISION=$2; shift 2 ;;
+            --tensor-parallel-size) TENSOR_PARALLEL_SIZE=$2; shift 2 ;;
             --cuda) CUDA_VERSIONS=$2; shift 2 ;;
             --spot) SPOT=true; shift ;;
             --preflight-approved) PREFLIGHT_APPROVED=1; shift ;;
@@ -67,21 +69,63 @@ launch)
     : "${STAGE:?--stage preflight|full|shard is required}"
     : "${GCS_RUN_URI:?--gcs-run-uri is required}"
     : "${REGISTRY_AUTH:?--registry-auth or RUNPOD_REGISTRY_AUTH_ID is required}"
+    case "${MODEL_ID}" in
+        nvidia/Cosmos3-Edge)
+            DEFAULT_MODEL_REVISION=2a00e87e9976dc3ed5533dd18caf4cdbc3a1bcb2
+            DEFAULT_GPU_COUNT=1
+            DEFAULT_TENSOR_PARALLEL_SIZE=1
+            DEFAULT_DISK_GB=100
+            DEFAULT_VOLUME_GB=200
+            MIN_DISK_GB=100
+            MIN_VOLUME_GB=200
+            ;;
+        nvidia/Cosmos3-Super)
+            DEFAULT_MODEL_REVISION=e0262be9d8f7586bc24c069a2aed2b665bdff266
+            DEFAULT_GPU_COUNT=4
+            DEFAULT_TENSOR_PARALLEL_SIZE=4
+            DEFAULT_DISK_GB=120
+            DEFAULT_VOLUME_GB=400
+            MIN_DISK_GB=100
+            MIN_VOLUME_GB=300
+            ;;
+        *)
+            echo "ERROR: unsupported --model-id ${MODEL_ID}." >&2
+            exit 1
+            ;;
+    esac
+    MODEL_REVISION=${MODEL_REVISION:-${DEFAULT_MODEL_REVISION}}
+    GPU_COUNT=${GPU_COUNT:-${DEFAULT_GPU_COUNT}}
+    TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-${DEFAULT_TENSOR_PARALLEL_SIZE}}
+    DISK_GB=${DISK_GB:-${DEFAULT_DISK_GB}}
+    VOLUME_GB=${VOLUME_GB:-${DEFAULT_VOLUME_GB}}
     if [ "${STAGE}" != "preflight" ] && [ "${STAGE}" != "full" ] && \
        [ "${STAGE}" != "shard" ]; then
         echo "ERROR: --stage must be preflight, full, or shard." >&2
         exit 1
     fi
-    if [ "${GPU_COUNT}" != "1" ]; then
-        echo "ERROR: the canonical benchmark is single-GPU; use --gpus 1." >&2
+    if ! [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] || \
+       ! [[ "${TENSOR_PARALLEL_SIZE}" =~ ^[0-9]+$ ]] || \
+       [ "${GPU_COUNT}" != "${TENSOR_PARALLEL_SIZE}" ]; then
+        echo "ERROR: --gpus must equal --tensor-parallel-size for the canonical benchmark." >&2
         exit 1
     fi
-    if ! [[ "${DISK_GB}" =~ ^[0-9]+$ ]] || [ "${DISK_GB}" -lt 100 ]; then
-        echo "ERROR: the Cosmos image requires --disk of at least 100 GB." >&2
+    if [ "${MODEL_ID}" = "nvidia/Cosmos3-Edge" ] && \
+       [ "${TENSOR_PARALLEL_SIZE}" != "1" ]; then
+        echo "ERROR: Cosmos3-Edge uses exactly one GPU in this benchmark." >&2
         exit 1
     fi
-    if ! [[ "${VOLUME_GB}" =~ ^[0-9]+$ ]] || [ "${VOLUME_GB}" -lt 200 ]; then
-        echo "ERROR: RF100VL, model cache, and results require --volume-size of at least 200 GB." >&2
+    if [ "${MODEL_ID}" = "nvidia/Cosmos3-Super" ] && \
+       [ "${TENSOR_PARALLEL_SIZE}" != "4" ] && \
+       [ "${TENSOR_PARALLEL_SIZE}" != "8" ]; then
+        echo "ERROR: Cosmos3-Super requires tensor parallel size 4 or 8." >&2
+        exit 1
+    fi
+    if ! [[ "${DISK_GB}" =~ ^[0-9]+$ ]] || [ "${DISK_GB}" -lt "${MIN_DISK_GB}" ]; then
+        echo "ERROR: the Cosmos image requires --disk of at least ${MIN_DISK_GB} GB." >&2
+        exit 1
+    fi
+    if ! [[ "${VOLUME_GB}" =~ ^[0-9]+$ ]] || [ "${VOLUME_GB}" -lt "${MIN_VOLUME_GB}" ]; then
+        echo "ERROR: ${MODEL_ID}, RF100VL, and results require --volume-size of at least ${MIN_VOLUME_GB} GB." >&2
         exit 1
     fi
     if ! [[ "${GCS_RUN_URI}" =~ ^gs://[^/]+/.+ ]]; then
@@ -140,6 +184,7 @@ launch)
         SHARD_MANIFEST_SHA256="${SHARD_MANIFEST_SHA256}" SHARD_ID="${SHARD_ID}" \
         GPU_COUNT="${GPU_COUNT}" DISK_GB="${DISK_GB}" VOLUME_GB="${VOLUME_GB}" \
         REGISTRY_AUTH="${REGISTRY_AUTH}" MODEL_REVISION="${MODEL_REVISION}" \
+        MODEL_ID="${MODEL_ID}" TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE}" \
         CUDA_VERSIONS="${CUDA_VERSIONS}" SPOT="${SPOT}" \
         PREFLIGHT_APPROVED="${PREFLIGHT_APPROVED}" \
         ALLOW_INCOMPLETE_PREFLIGHT="${ALLOW_INCOMPLETE_PREFLIGHT}" python3 - <<'PY'
@@ -149,8 +194,9 @@ import os
 env = {
     "COSMOS_STAGE": os.environ["STAGE"],
     "COSMOS_GCS_RUN_URI": os.environ["GCS_RUN_URI"],
-    "COSMOS_MODEL_ID": "nvidia/Cosmos3-Edge",
+    "COSMOS_MODEL_ID": os.environ["MODEL_ID"],
     "COSMOS_MODEL_REVISION": os.environ["MODEL_REVISION"],
+    "COSMOS_TENSOR_PARALLEL_SIZE": os.environ["TENSOR_PARALLEL_SIZE"],
     "COSMOS_EXPECTED_DATASETS": "100",
     "COSMOS_WORKERS": "1",
     "COSMOS_IMAGE_REF": os.environ["IMAGE"],
