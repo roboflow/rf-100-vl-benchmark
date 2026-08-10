@@ -721,9 +721,12 @@ def verify_one_dataset(save_dir: Path, dataset: str) -> dict[str, Any]:
     if summary.get("new_error_count") != 0:
         raise RuntimeError("One-dataset smoke run contains image errors.")
     metrics = summary.get("metrics", {})
-    if not metrics or not all(
-        isinstance(value, (int, float)) and math.isfinite(value)
-        for value in metrics.values()
+    required_metrics = ("AP", "AP50")
+    if not isinstance(metrics, dict) or not all(
+        isinstance(metrics.get(name), (int, float))
+        and not isinstance(metrics.get(name), bool)
+        and math.isfinite(metrics[name])
+        for name in required_metrics
     ):
         raise RuntimeError("One-dataset COCO metrics are missing or non-finite.")
     diagnostics = summary.get("diagnostics", {})

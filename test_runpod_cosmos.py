@@ -1002,7 +1002,12 @@ class RuntimeHelperTests(unittest.TestCase):
                         "image_count": 1,
                         "completed_image_count": 1,
                         "new_error_count": 0,
-                        "metrics": {"mAP_50_95": 0.1, "mAP_50": 0.2},
+                        "metrics": {
+                            "AP": 0.1,
+                            "AP50": 0.2,
+                            "max_dets": [1, 10, 500],
+                            "cocoeval_output": "valid non-numeric COCO metadata",
+                        },
                         "diagnostics": {
                             "invalid_boxes": 1,
                             "duplicate_boxes": 0,
@@ -1020,6 +1025,36 @@ class RuntimeHelperTests(unittest.TestCase):
 
             self.assertEqual(verified["parser_diagnostics"]["invalid_boxes"], 1)
             self.assertEqual(verified["parser_diagnostics"]["ignored_label_count"], 1)
+
+    def test_scored_dataset_verification_rejects_nonfinite_required_metric(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            save_dir = Path(temporary)
+            dataset_dir = save_dir / "dataset-ready"
+            records = dataset_dir / "records"
+            visualizations = dataset_dir / "visualizations"
+            records.mkdir(parents=True)
+            visualizations.mkdir()
+            (records / "1.json").write_text(
+                json.dumps({"status": "success", "raw_response": "[]"}),
+                encoding="utf-8",
+            )
+            (visualizations / "1.jpg").write_bytes(b"test")
+            (dataset_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "complete": True,
+                        "image_count": 1,
+                        "completed_image_count": 1,
+                        "new_error_count": 0,
+                        "metrics": {"AP": float("nan"), "AP50": 0.2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (save_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "missing or non-finite"):
+                verify_one_dataset(save_dir, "dataset-ready")
 
     def test_early_smoke_uses_one_image_and_uploads_control_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
