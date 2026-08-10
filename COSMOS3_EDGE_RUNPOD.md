@@ -56,7 +56,9 @@ is 8,192 generated tokens with a 180-second per-image timeout. Token-capped,
 timed-out, and irrecoverably malformed model responses are durably classified
 rather than leaving datasets incomplete. Complete, explicitly encoded boxes are
 salvaged from a malformed or truncated tail; otherwise the image contributes
-zero detections.
+zero detections. Recoverable invalid, duplicate, clamped, reordered, or
+out-of-vocabulary individual detections remain recorded in diagnostics but do
+not abort an otherwise valid response; only accepted detections are scored.
 
 ## Build the image
 

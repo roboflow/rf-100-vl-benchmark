@@ -38,6 +38,7 @@ from run_cosmos_job import (
     start_dataset_acquisition,
     stop_dataset_acquisition,
     verify_early_download_smoke,
+    verify_one_dataset,
     wait_for_server,
     wait_for_first_ready_dataset,
     vllm_command,
@@ -937,7 +938,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertIn("infra/download_rf100vl.py", command)
             process.wait.assert_not_called()
 
-    def test_early_smoke_verification_requires_one_clean_record_and_overlay(self):
+    def test_early_smoke_verification_preserves_recoverable_diagnostics(self):
         with tempfile.TemporaryDirectory() as temporary:
             save_dir = Path(temporary)
             dataset_dir = save_dir / "dataset-ready"
@@ -952,8 +953,8 @@ class RuntimeHelperTests(unittest.TestCase):
                         "raw_response": "[]",
                         "finish_reason": "stop",
                         "diagnostics": {
-                            "invalid_boxes": 0,
-                            "duplicate_boxes": 0,
+                            "invalid_boxes": 1,
+                            "duplicate_boxes": 2,
                             "clamped_boxes": 0,
                             "reordered_axes": 0,
                             "ignored_labels": [],
@@ -969,7 +970,56 @@ class RuntimeHelperTests(unittest.TestCase):
             )
             verified = verify_early_download_smoke(save_dir, "dataset-ready")
             self.assertEqual(verified["finish_reason"], "stop")
+            self.assertEqual(verified["diagnostics"]["invalid_boxes"], 1)
+            self.assertEqual(verified["diagnostics"]["duplicate_boxes"], 2)
             self.assertEqual(verified["diagnostics"]["ignored_label_count"], 0)
+
+    def test_scored_dataset_verification_preserves_recoverable_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            save_dir = Path(temporary)
+            dataset_dir = save_dir / "dataset-ready"
+            records = dataset_dir / "records"
+            visualizations = dataset_dir / "visualizations"
+            records.mkdir(parents=True)
+            visualizations.mkdir()
+            (records / "1.json").write_text(
+                json.dumps(
+                    {
+                        "status": "success",
+                        "raw_response": (
+                            '[{"bbox_2d":null,"label":"absent"},'
+                            '{"bbox_2d":[0,0,1000,1000],"label":"object"}]'
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (visualizations / "1.jpg").write_bytes(b"test")
+            (dataset_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "complete": True,
+                        "image_count": 1,
+                        "completed_image_count": 1,
+                        "new_error_count": 0,
+                        "metrics": {"mAP_50_95": 0.1, "mAP_50": 0.2},
+                        "diagnostics": {
+                            "invalid_boxes": 1,
+                            "duplicate_boxes": 0,
+                            "clamped_boxes": 0,
+                            "reordered_axes": 0,
+                            "ignored_label_count": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (save_dir / "_SUCCESS.json").write_text("{}", encoding="utf-8")
+
+            verified = verify_one_dataset(save_dir, "dataset-ready")
+
+            self.assertEqual(verified["parser_diagnostics"]["invalid_boxes"], 1)
+            self.assertEqual(verified["parser_diagnostics"]["ignored_label_count"], 1)
 
     def test_early_smoke_uses_one_image_and_uploads_control_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:

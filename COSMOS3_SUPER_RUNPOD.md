@@ -24,6 +24,9 @@ The detection prompt, media-first message layout, robust parser, normalized
 are identical to the completed Edge run. The inherited prompt identifier still
 contains `edge` because preserving it proves the prompt itself did not change;
 the run and every record identify the actual model as Cosmos3-Super.
+Recoverable individual detections (for example, a null box for an absent class)
+are excluded from predictions while their diagnostics and the complete raw
+response remain durable. They do not abort an otherwise valid image or dataset.
 
 The standard collective is required because the vLLM Cosmos image otherwise
 auto-selects FlashInfer MNNVL fused/custom all-reduce on this RunPod H100
