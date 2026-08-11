@@ -1,0 +1,6 @@
+{
+  "Goalie": "Referee",
+  "Longpole": "Shortstick",
+  "Referee": "Goalie",
+  "Shortstick": "Longpole"
+}

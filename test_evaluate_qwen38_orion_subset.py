@@ -113,3 +113,23 @@ def test_full_run_uses_every_test_image_and_can_select_one_new_mode():
     )
     assert len(tasks) == 59
     assert {task.mode for task in tasks} == {"multi_class_positive_numeric"}
+
+
+def test_non_orion_full_run_does_not_reuse_orion_nested_records(tmp_path):
+    dataset = Path("RF100VL/rf20-vl-fsod/lacrosse-object-detection")
+    output = tmp_path / "lacrosse"
+    assert subset.main([
+        "--subset", "full",
+        "--dataset-dir", str(dataset),
+        "--negative-pairs-file",
+        "qwen38-fsod-configs/lacrosse-object-detection-negative-pairs.json",
+        "--new-modes", "multi_class_positive_numeric",
+        "--reasoning-efforts", "none", "low",
+        "--output-dir", str(output),
+        "--prepare-only",
+    ]) == 0
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert len(manifest["image_ids"]) == 50
+    assert manifest["new_api_request_count"] == 100
+    assert manifest["reused_nested_request_count"] == 0
+    assert not list(output.glob("*/records/**/*.json"))

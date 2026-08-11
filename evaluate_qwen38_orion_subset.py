@@ -187,23 +187,32 @@ def score_all_modes(
     ground_truth_path: Path,
     effort: str,
     tasks: Sequence[base.Task],
-    full_run: Path,
+    full_run: Path | None,
     image_ids: Sequence[int],
     subset_version: str,
     new_modes: Sequence[str] = NEW_MODES,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for mode in base.MODES:
-        predictions = filtered_predictions(full_run, mode, image_ids)
-        metrics = base.score_coco(ground_truth_path, predictions)
-        predictions_path = output_directory / effort / "predictions" / f"{mode}.json"
-        base.atomic_write_json(predictions_path, predictions)
-        result[mode] = {
-            "source": "rescored_completed_full_run",
-            "prediction_count": len(predictions),
-            "predictions_path": str(predictions_path),
-            "metrics": metrics,
-        }
+    if full_run is not None:
+        for mode in base.MODES:
+            source = full_run / "predictions" / f"{mode}.json"
+            source_metrics = base.load_record(full_run / "metrics" / f"{mode}.json")
+            if (
+                not source.is_file()
+                or not source_metrics
+                or not source_metrics.get("complete")
+            ):
+                continue
+            predictions = filtered_predictions(full_run, mode, image_ids)
+            metrics = base.score_coco(ground_truth_path, predictions)
+            predictions_path = output_directory / effort / "predictions" / f"{mode}.json"
+            base.atomic_write_json(predictions_path, predictions)
+            result[mode] = {
+                "source": "rescored_completed_full_run",
+                "prediction_count": len(predictions),
+                "predictions_path": str(predictions_path),
+                "metrics": metrics,
+            }
     for mode in new_modes:
         predictions: list[dict[str, Any]] = []
         statuses: dict[str, int] = {}
@@ -301,6 +310,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default=base.MODEL_ID)
     parser.add_argument(
+        "--negative-pairs-file",
+        type=Path,
+        help="JSON object mapping every class name to a different negative class.",
+    )
+    parser.add_argument(
+        "--existing-full-run-none",
+        type=Path,
+        help="Completed no-reasoning base-mode run to include in the comparison.",
+    )
+    parser.add_argument(
         "--base-url",
         default="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     )
@@ -357,7 +376,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     image_ids = image_ids_for_run(test, args.subset)
     categories = base.categories_by_id(test)
     examples = base.select_reference_examples(train)
-    negative_ids = base.validate_negative_pairs(categories)
+    negative_class_pairs = base.NEGATIVE_CLASS_PAIRS
+    if args.negative_pairs_file is not None:
+        negative_class_pairs = json.loads(
+            args.negative_pairs_file.resolve().read_text(encoding="utf-8")
+        )
+        if not isinstance(negative_class_pairs, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in negative_class_pairs.items()
+        ):
+            raise ValueError("Negative-class pairs must be a JSON string-to-string object.")
+    negative_ids = base.validate_negative_pairs(categories, negative_class_pairs)
     assets = base.prepare_reference_assets(
         train_directory, output_directory / "references", examples, negative_ids
     )
@@ -368,10 +397,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     nested_image_ids: Sequence[int] = ()
     nested_run_directory: Path | None = None
-    if args.subset == "twenty":
+    if args.subset == "twenty" and dataset_directory.name == "orionproducts":
         nested_image_ids = SUBSET_IMAGE_IDS_BY_NAME["five"]
         nested_run_directory = FIVE_RUN_DIRECTORY
-    elif args.subset == "full":
+    elif args.subset == "full" and dataset_directory.name == "orionproducts":
         nested_image_ids = SUBSET_IMAGE_IDS_BY_NAME["twenty"]
         nested_run_directory = TWENTY_RUN_DIRECTORY
 
@@ -386,6 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "new_modes": list(args.new_modes),
         "reasoning_efforts": list(args.reasoning_efforts),
+        "negative_class_pairs": negative_class_pairs,
         "reference_examples": {
             str(category_id): asdict(example)
             for category_id, example in examples.items()
@@ -426,9 +456,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise ValueError(f"Reusable checkpoint fingerprint mismatch: {source}")
                 base.atomic_write_json(destination, existing)
 
+    full_runs: dict[str, Path] = (
+        {"none": args.existing_full_run_none.resolve()}
+        if args.existing_full_run_none is not None
+        else {key: value.resolve() for key, value in DEFAULT_FULL_RUNS.items()}
+    )
     summaries = {}
     for effort in args.reasoning_efforts:
-        full_run = DEFAULT_FULL_RUNS[effort].resolve()
+        full_run = full_runs.get(effort)
         summaries[effort] = score_all_modes(
             output_directory,
             ground_truth_path,
@@ -514,7 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ground_truth_path,
             effort,
             tasks,
-            DEFAULT_FULL_RUNS[effort].resolve(),
+            full_runs.get(effort),
             image_ids,
             subset_version,
             args.new_modes,

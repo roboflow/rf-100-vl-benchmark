@@ -295,15 +295,25 @@ def select_reference_examples(train: dict[str, Any]) -> dict[int, ReferenceExamp
     return examples
 
 
-def validate_negative_pairs(categories: dict[int, str]) -> dict[int, int]:
+def validate_negative_pairs(
+    categories: dict[int, str],
+    negative_class_pairs: dict[str, str] | None = None,
+) -> dict[int, int]:
+    negative_class_pairs = negative_class_pairs or NEGATIVE_CLASS_PAIRS
     names_to_ids = {name: category_id for category_id, name in categories.items()}
-    if set(names_to_ids) != set(NEGATIVE_CLASS_PAIRS):
+    if set(names_to_ids) != set(negative_class_pairs):
         raise ValueError(
             "The fixed negative-class map does not exactly match dataset classes: "
-            f"dataset={sorted(names_to_ids)}, map={sorted(NEGATIVE_CLASS_PAIRS)}"
+            f"dataset={sorted(names_to_ids)}, map={sorted(negative_class_pairs)}"
         )
+    unknown_targets = set(negative_class_pairs.values()) - set(names_to_ids)
+    if unknown_targets:
+        raise ValueError(f"Negative-class map contains unknown targets: {sorted(unknown_targets)}")
+    self_pairs = sorted(name for name, negative in negative_class_pairs.items() if name == negative)
+    if self_pairs:
+        raise ValueError(f"Negative-class map contains self-pairs: {self_pairs}")
     return {
-        category_id: names_to_ids[NEGATIVE_CLASS_PAIRS[name]]
+        category_id: names_to_ids[negative_class_pairs[name]]
         for category_id, name in categories.items()
     }
 
@@ -872,6 +882,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=Path("qwen38-orion-runs/orion-prompt-modes-v1"),
     )
     parser.add_argument("--model", default=MODEL_ID)
+    parser.add_argument(
+        "--negative-pairs-file",
+        type=Path,
+        help="JSON object mapping every class name to a different negative class.",
+    )
     parser.add_argument("--base-url", default="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument(
@@ -935,8 +950,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     categories = categories_by_id(test)
     if categories != categories_by_id(train):
         raise ValueError("Train/test categories differ.")
+    negative_class_pairs = NEGATIVE_CLASS_PAIRS
+    if args.negative_pairs_file is not None:
+        loaded_pairs = json.loads(
+            args.negative_pairs_file.resolve().read_text(encoding="utf-8")
+        )
+        if not isinstance(loaded_pairs, dict):
+            raise ValueError("Negative-class pairs must be a JSON object.")
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in loaded_pairs.items()):
+            raise ValueError("Negative-class pairs must be a JSON string-to-string object.")
+        negative_class_pairs = loaded_pairs
     examples = select_reference_examples(train)
-    negative_ids = validate_negative_pairs(categories)
+    negative_ids = validate_negative_pairs(categories, negative_class_pairs)
     assets = prepare_reference_assets(
         train_directory, output_directory / "references", examples, negative_ids
     )
@@ -975,7 +1000,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "test_annotation_sha256": sha256_file(test_path),
         "settings": settings,
         "modes": list(MODES),
-        "negative_class_pairs": NEGATIVE_CLASS_PAIRS,
+        "negative_class_pairs": negative_class_pairs,
     }
     write_or_validate_manifest(
         output_directory / "run_manifest.json", configuration, examples, negative_ids

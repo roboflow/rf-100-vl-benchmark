@@ -139,6 +139,20 @@ def test_no_reasoning_is_an_explicit_supported_condition():
     assert args.reasoning_effort == "none"
 
 
+def test_negative_pair_map_can_be_supplied_for_another_fsod_dataset():
+    dataset_path = Path("RF100VL/rf20-vl-fsod/lacrosse-object-detection")
+    test = qwen.load_coco(dataset_path / "test/_annotations.coco.json")
+    categories = qwen.categories_by_id(test)
+    pairs = json.loads(
+        Path(
+            "qwen38-fsod-configs/lacrosse-object-detection-negative-pairs.json"
+        ).read_text()
+    )
+    negative_ids = qwen.validate_negative_pairs(categories, pairs)
+    assert set(negative_ids) == set(categories)
+    assert all(category_id != negative_id for category_id, negative_id in negative_ids.items())
+
+
 def test_final_defaults_can_saturate_singapore_quota_without_bursting():
     args = qwen.parse_args([])
     assert args.concurrency == 256
