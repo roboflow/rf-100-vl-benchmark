@@ -1,0 +1,24 @@
+{
+  "conditions": [
+    {"mode":"multi_anonymous_explicit_numeric_b01","formulation":"multi","semantics":"anonymous_explicit","representation":"numeric","box_count":1},
+    {"mode":"multi_anonymous_explicit_numeric_b02","formulation":"multi","semantics":"anonymous_explicit","representation":"numeric","box_count":2},
+    {"mode":"multi_anonymous_explicit_numeric_b05","formulation":"multi","semantics":"anonymous_explicit","representation":"numeric","box_count":5},
+    {"mode":"multi_anonymous_explicit_numeric_b07","formulation":"multi","semantics":"anonymous_explicit","representation":"numeric","box_count":7},
+    {"mode":"multi_anonymous_explicit_numeric_b10","formulation":"multi","semantics":"anonymous_explicit","representation":"numeric","box_count":10},
+    {"mode":"multi_anonymous_explicit_drawn_b01","formulation":"multi","semantics":"anonymous_explicit","representation":"drawn","box_count":1},
+    {"mode":"multi_anonymous_explicit_drawn_b02","formulation":"multi","semantics":"anonymous_explicit","representation":"drawn","box_count":2},
+    {"mode":"multi_anonymous_explicit_drawn_b05","formulation":"multi","semantics":"anonymous_explicit","representation":"drawn","box_count":5},
+    {"mode":"multi_anonymous_explicit_drawn_b07","formulation":"multi","semantics":"anonymous_explicit","representation":"drawn","box_count":7},
+    {"mode":"multi_anonymous_explicit_drawn_b10","formulation":"multi","semantics":"anonymous_explicit","representation":"drawn","box_count":10},
+    {"mode":"multi_anonymous_minimal_numeric_b01","formulation":"multi","semantics":"anonymous_minimal","representation":"numeric","box_count":1},
+    {"mode":"multi_anonymous_minimal_numeric_b02","formulation":"multi","semantics":"anonymous_minimal","representation":"numeric","box_count":2},
+    {"mode":"multi_anonymous_minimal_numeric_b05","formulation":"multi","semantics":"anonymous_minimal","representation":"numeric","box_count":5},
+    {"mode":"multi_anonymous_minimal_numeric_b07","formulation":"multi","semantics":"anonymous_minimal","representation":"numeric","box_count":7},
+    {"mode":"multi_anonymous_minimal_numeric_b10","formulation":"multi","semantics":"anonymous_minimal","representation":"numeric","box_count":10},
+    {"mode":"multi_anonymous_minimal_drawn_b01","formulation":"multi","semantics":"anonymous_minimal","representation":"drawn","box_count":1},
+    {"mode":"multi_anonymous_minimal_drawn_b02","formulation":"multi","semantics":"anonymous_minimal","representation":"drawn","box_count":2},
+    {"mode":"multi_anonymous_minimal_drawn_b05","formulation":"multi","semantics":"anonymous_minimal","representation":"drawn","box_count":5},
+    {"mode":"multi_anonymous_minimal_drawn_b07","formulation":"multi","semantics":"anonymous_minimal","representation":"drawn","box_count":7},
+    {"mode":"multi_anonymous_minimal_drawn_b10","formulation":"multi","semantics":"anonymous_minimal","representation":"drawn","box_count":10}
+  ]
+}

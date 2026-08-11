@@ -104,6 +104,10 @@ NEGATIVE_CLASS_PAIRS = {
 LOGGER = logging.getLogger("qwen38_orion")
 
 
+class GenerationDeadlineError(TimeoutError):
+    """A streaming generation exceeded its total wall-clock allowance."""
+
+
 @dataclass(frozen=True)
 class Task:
     mode: str
@@ -647,6 +651,14 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
     finish_reason = None
     usage = None
     for chunk in stream:
+        if time.monotonic() - started > settings["timeout_seconds"]:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+            raise GenerationDeadlineError(
+                "Streaming generation exceeded the configured "
+                f"{settings['timeout_seconds']:.1f}-second deadline."
+            )
         if chunk.usage is not None:
             usage = chunk.usage.model_dump()
         for choice in chunk.choices:
@@ -768,6 +780,25 @@ def execute_task(
                 "diagnostics": diagnostics,
                 "attempts": attempts + [{"attempt": attempt, "status": "success"}],
                 "inference_seconds": inference["elapsed_seconds"],
+                "elapsed_seconds": time.monotonic() - started,
+                "completed_at": utc_now(),
+            }
+        except GenerationDeadlineError as error:
+            # Retrying an identical deterministic prompt can multiply the
+            # per-image budget without useful new evidence. Treat this as a
+            # terminal model failure and retain an explicit timeout type.
+            return {
+                "status": "model_failure",
+                "failure_type": "generation_timeout",
+                "error": str(error),
+                "task": asdict(task),
+                "task_key": task.key,
+                "request_fingerprint": fingerprint,
+                "request_summary": summary,
+                "raw_response": None,
+                "predictions": [],
+                "attempts": attempts
+                + [{"attempt": attempt, "status": "generation_timeout"}],
                 "elapsed_seconds": time.monotonic() - started,
                 "completed_at": utc_now(),
             }

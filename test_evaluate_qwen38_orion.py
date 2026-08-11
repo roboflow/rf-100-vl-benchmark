@@ -173,6 +173,83 @@ def test_stream_request_sends_temperature_only_when_configured():
     assert client.chat.completions.calls[1]["temperature"] == 0.0
 
 
+def test_streaming_generation_has_a_total_wall_clock_deadline(monkeypatch):
+    class Stream:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            yield type("Chunk", (), {"usage": None, "choices": []})()
+
+        def close(self):
+            self.closed = True
+
+    stream = Stream()
+
+    class Completions:
+        def create(self, **_kwargs):
+            return stream
+
+    client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": Completions()})()},
+    )()
+    times = iter((100.0, 281.0))
+    monkeypatch.setattr(qwen.time, "monotonic", lambda: next(times))
+    settings = {
+        "model": "qwen3.8-max",
+        "seed": 1234,
+        "max_completion_tokens": 8192,
+        "reasoning_effort": "none",
+        "vl_high_resolution_images": False,
+        "timeout_seconds": 180.0,
+    }
+    with pytest.raises(qwen.GenerationDeadlineError):
+        qwen.stream_inference(client, [{"role": "user", "content": "test"}], settings)
+    assert stream.closed
+
+
+def test_generation_deadline_is_terminal_model_failure_without_retry(monkeypatch):
+    monkeypatch.setattr(
+        qwen,
+        "stream_inference",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            qwen.GenerationDeadlineError("deadline")
+        ),
+    )
+    task = qwen.Task(
+        mode="single_class_names",
+        image_id=1,
+        file_name="unused.jpg",
+        width=100,
+        height=100,
+        category_id=7,
+        category_name="object",
+    )
+    record = qwen.execute_task(
+        task,
+        object(),
+        Path("."),
+        {7: "object"},
+        {},
+        {},
+        {},
+        {
+            "reasoning_effort": "none",
+            "seed": 1234,
+            "timeout_seconds": 180.0,
+        },
+        max_retries=3,
+        messages_override=[
+            {"role": "user", "content": [{"type": "text", "text": "test"}]}
+        ],
+    )
+    assert record["status"] == "model_failure"
+    assert record["failure_type"] == "generation_timeout"
+    assert record["attempts"] == [{"attempt": 1, "status": "generation_timeout"}]
+
+
 def test_negative_pair_map_can_be_supplied_for_another_fsod_dataset():
     dataset_path = Path("RF100VL/rf20-vl-fsod/lacrosse-object-detection")
     test = qwen.load_coco(dataset_path / "test/_annotations.coco.json")
