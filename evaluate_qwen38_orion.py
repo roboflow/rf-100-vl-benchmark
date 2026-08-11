@@ -168,7 +168,9 @@ class SmoothDualRateLimiter:
 def estimated_request_tokens(task: Task, reasoning_effort: str) -> int:
     by_mode = ESTIMATED_TOTAL_TOKENS.get(reasoning_effort)
     if by_mode is not None:
-        return by_mode[task.mode]
+        # Standalone extensions may add larger multi-reference modes. Their
+        # conservative fallback prevents those requests from bursting TPM.
+        return by_mode.get(task.mode, 10_000)
     # Medium/xhigh can consume most of the configured completion budget. Pace
     # them conservatively until a dedicated pilot supplies measured estimates.
     return 7000
@@ -657,10 +659,15 @@ def execute_task(
     settings: dict[str, Any],
     max_retries: int,
     rate_limiter: SmoothDualRateLimiter | None = None,
+    messages_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    messages = build_messages(
-        task, test_directory, categories, examples, negative_ids, assets
+    messages = (
+        messages_override
+        if messages_override is not None
+        else build_messages(
+            task, test_directory, categories, examples, negative_ids, assets
+        )
     )
     summary = request_summary(messages)
     fingerprint = request_fingerprint(task, summary, settings)
