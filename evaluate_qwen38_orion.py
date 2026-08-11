@@ -61,6 +61,31 @@ NEGATIVE_MODES = frozenset(
 )
 TERMINAL_STATUSES = frozenset({"success", "model_failure"})
 NORMALIZED_COORDINATE_MAX = 1000
+DEFAULT_CONCURRENCY = 256
+DEFAULT_REQUESTS_PER_MINUTE = 570.0
+DEFAULT_TOKENS_PER_MINUTE = 900_000.0
+
+# Scheduling estimates measured from the completed Orion pilot, rounded upward.
+# They are used only to pace requests below DashScope's account-wide TPM limit;
+# provider-reported usage remains the source of truth in every saved record.
+ESTIMATED_TOTAL_TOKENS = {
+    "none": {
+        "multi_class_names": 1325,
+        "single_class_names": 750,
+        "positive_numeric": 1200,
+        "positive_drawn": 1125,
+        "positive_negative_numeric": 1750,
+        "positive_negative_drawn": 1600,
+    },
+    "low": {
+        "multi_class_names": 2125,
+        "single_class_names": 1000,
+        "positive_numeric": 1550,
+        "positive_drawn": 1525,
+        "positive_negative_numeric": 2200,
+        "positive_negative_drawn": 2050,
+    },
+}
 
 # These pairs are fixed before looking at test performance. They capture the
 # natural product-family confounders in the dataset; the two unpaired product
@@ -104,6 +129,49 @@ class ReferenceExample:
     width: int
     height: int
     boxes_xyxy_1000: tuple[tuple[int, int, int, int], ...]
+
+
+class SmoothDualRateLimiter:
+    """Uniformly pace starts under both request and estimated-token quotas."""
+
+    def __init__(
+        self,
+        requests_per_minute: float,
+        tokens_per_minute: float,
+        *,
+        clock: Any = time.monotonic,
+        sleeper: Any = time.sleep,
+    ) -> None:
+        if requests_per_minute <= 0 or tokens_per_minute <= 0:
+            raise ValueError("RPM and TPM targets must be positive.")
+        self.request_interval = 60.0 / requests_per_minute
+        self.tokens_per_minute = tokens_per_minute
+        self.clock = clock
+        self.sleeper = sleeper
+        self.lock = threading.Lock()
+        self.next_start = 0.0
+
+    def acquire(self, estimated_tokens: int) -> None:
+        if estimated_tokens <= 0:
+            raise ValueError("Estimated request tokens must be positive.")
+        token_interval = 60.0 * estimated_tokens / self.tokens_per_minute
+        interval = max(self.request_interval, token_interval)
+        with self.lock:
+            now = self.clock()
+            scheduled = max(now, self.next_start)
+            self.next_start = scheduled + interval
+        delay = scheduled - now
+        if delay > 0:
+            self.sleeper(delay)
+
+
+def estimated_request_tokens(task: Task, reasoning_effort: str) -> int:
+    by_mode = ESTIMATED_TOTAL_TOKENS.get(reasoning_effort)
+    if by_mode is not None:
+        return by_mode[task.mode]
+    # Medium/xhigh can consume most of the configured completion budget. Pace
+    # them conservatively until a dedicated pilot supplies measured estimates.
+    return 7000
 
 
 def utc_now() -> str:
@@ -588,6 +656,7 @@ def execute_task(
     assets: dict[int, dict[str, Path]],
     settings: dict[str, Any],
     max_retries: int,
+    rate_limiter: SmoothDualRateLimiter | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     messages = build_messages(
@@ -598,6 +667,10 @@ def execute_task(
     attempts = []
     for attempt in range(1, max_retries + 2):
         try:
+            if rate_limiter is not None:
+                rate_limiter.acquire(
+                    estimated_request_tokens(task, settings["reasoning_effort"])
+                )
             inference = stream_inference(client, messages, settings)
             raw = inference["response"]
             if inference["finish_reason"] == "length":
@@ -793,7 +866,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--base-url", default="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    parser.add_argument(
+        "--requests-per-minute",
+        type=float,
+        default=DEFAULT_REQUESTS_PER_MINUTE,
+        help="Smooth account-wide request target; Singapore qwen3.8-max limit is 600.",
+    )
+    parser.add_argument(
+        "--tokens-per-minute",
+        type=float,
+        default=DEFAULT_TOKENS_PER_MINUTE,
+        help="Estimated-token pacing target; Singapore qwen3.8-max limit is 1,000,000.",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--max-completion-tokens", type=int, default=8192)
     parser.add_argument(
@@ -820,6 +905,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.concurrency < 1 or args.max_retries < 0:
         raise ValueError("Concurrency must be positive and retries nonnegative.")
+    if args.requests_per_minute <= 0 or args.tokens_per_minute <= 0:
+        raise ValueError("RPM and TPM targets must be positive.")
     if args.limit is not None and args.limit_per_mode is not None:
         raise ValueError("--limit and --limit-per-mode are mutually exclusive.")
     if args.limit is not None and args.limit < 0:
@@ -934,7 +1021,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode_tasks = [task for task in pending if task.mode == mode]
             limited.extend(mode_tasks[: args.limit_per_mode])
         pending = limited
-    LOGGER.info("Starting %d pending API tasks with concurrency=%d.", len(pending), args.concurrency)
+    rate_limiter = SmoothDualRateLimiter(
+        args.requests_per_minute,
+        args.tokens_per_minute,
+    )
+    LOGGER.info(
+        "Starting %d pending API tasks with concurrency=%d, target_rpm=%.1f, "
+        "target_tpm=%.0f.",
+        len(pending),
+        args.concurrency,
+        args.requests_per_minute,
+        args.tokens_per_minute,
+    )
 
     write_lock = threading.Lock()
     completed = 0
@@ -951,6 +1049,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assets,
                 settings,
                 args.max_retries,
+                rate_limiter,
             ): task
             for task in pending
         }

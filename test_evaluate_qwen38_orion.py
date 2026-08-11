@@ -139,6 +139,45 @@ def test_no_reasoning_is_an_explicit_supported_condition():
     assert args.reasoning_effort == "none"
 
 
+def test_final_defaults_can_saturate_singapore_quota_without_bursting():
+    args = qwen.parse_args([])
+    assert args.concurrency == 256
+    assert args.requests_per_minute == 570
+    assert args.tokens_per_minute == 900_000
+
+
+def test_dual_rate_limiter_uses_the_binding_quota():
+    now = [0.0]
+    sleeps = []
+
+    def clock():
+        return now[0]
+
+    def sleeper(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    limiter = qwen.SmoothDualRateLimiter(
+        requests_per_minute=600,
+        tokens_per_minute=60_000,
+        clock=clock,
+        sleeper=sleeper,
+    )
+    limiter.acquire(1000)
+    limiter.acquire(1000)
+    limiter.acquire(100)
+
+    # 1,000 tokens at 60k TPM binds at one start per second. The following
+    # low-token request cannot burst ahead of its already-reserved slot.
+    assert sleeps == pytest.approx([1.0, 1.0])
+
+
+def test_token_estimates_cover_all_modes_and_reasoning_conditions():
+    for effort in ("none", "low"):
+        assert set(qwen.ESTIMATED_TOTAL_TOKENS[effort]) == set(qwen.MODES)
+        assert all(value > 0 for value in qwen.ESTIMATED_TOTAL_TOKENS[effort].values())
+
+
 def test_manifest_fails_closed_on_configuration_change(tmp_path, dataset):
     _, _, _, examples, negatives = dataset
     path = tmp_path / "manifest.json"
