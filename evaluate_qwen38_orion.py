@@ -1116,14 +1116,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     progress = summarize_records(all_tasks, output_directory)
     atomic_write_json(output_directory / "progress.json", progress)
     aggregate = finalize_modes(all_tasks, test_path, output_directory)
-    failures = progress["total"]["error"] + progress["total"]["pending"]
-    complete_modes = sum(value["complete"] for value in aggregate["modes"].values())
+    selected_progress = summarize_records(tasks, output_directory)
+    failures = (
+        selected_progress["total"]["error"]
+        + selected_progress["total"]["pending"]
+    )
+    complete_modes = sum(
+        aggregate["modes"][mode]["complete"] for mode in selected_modes
+    )
     LOGGER.info(
-        "Invocation finished: terminal=%d/%d, complete_modes=%d/%d, unresolved=%d.",
-        progress["total"]["success"] + progress["total"]["model_failure"],
-        progress["total"]["total"],
+        "Invocation finished: selected_terminal=%d/%d, complete_modes=%d/%d, "
+        "selected_unresolved=%d.",
+        selected_progress["total"]["success"]
+        + selected_progress["total"]["model_failure"],
+        selected_progress["total"]["total"],
         complete_modes,
-        len(MODES),
+        len(selected_modes),
         failures,
     )
     return 0 if failures == 0 else 2
