@@ -1,0 +1,9 @@
+{
+  "conditions": [
+    {"mode":"noise_repeat_01","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"noise_repeat_02","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"noise_repeat_03","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"noise_repeat_04","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"noise_repeat_05","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234}
+  ]
+}

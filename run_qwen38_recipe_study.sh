@@ -53,6 +53,29 @@ if [[ ! -f qwen38-fsod-runs/dreidel-exemplar-only-box-combined-v1/_SUCCESS.json 
   run_resumable bash run_qwen38_exemplar_only_extension.sh || exit $?
 fi
 
+# Establish the residual fixed-test noise floor before making any close-call
+# selection. Each dataset gets five identical complete repeats with all known
+# sampling controls fixed.
+run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python evaluate_qwen38_recipe.py \
+  --dataset-dir "$DREIDEL" \
+  --conditions qwen38-fsod-configs/noise-floor-multi-names.json \
+  --output-dir "$STUDY_DIR/dreidel-noise-floor" \
+  "${COMMON[@]}" || exit $?
+
+run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python evaluate_qwen38_recipe.py \
+  --dataset-dir "$ORION" \
+  --conditions qwen38-fsod-configs/noise-floor-multi-names.json \
+  --output-dir "$STUDY_DIR/orion-noise-floor" \
+  "${COMMON[@]}" || exit $?
+
+"$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python analyze_qwen38_noise_floor.py \
+  --run "dreidel=$STUDY_DIR/dreidel-noise-floor" \
+  --run "orion=$STUDY_DIR/orion-noise-floor" \
+  --output "$STUDY_DIR/noise_floor.json" || exit $?
+
 # Complete the only missing full factorial: anonymous multi-class concepts.
 run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   python evaluate_qwen38_recipe.py \
@@ -66,6 +89,7 @@ run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   --named-summary qwen38-fsod-runs/dreidel-box-count-ablation-v1/comparison_summary.json \
   --anonymous-single-summary qwen38-fsod-runs/dreidel-exemplar-only-box-combined-v1/comparison_summary.json \
   --anonymous-multi-summary qwen38-fsod-runs/dreidel-anonymous-multi-screen-v1/comparison_summary.json \
+  --noise-floor "$STUDY_DIR/noise_floor.json" \
   --dreidel-annotations "$DREIDEL/test/_annotations.coco.json" \
   --orion-annotations "$ORION/test/_annotations.coco.json" \
   --output-dir "$STUDY_DIR" || exit $?
@@ -103,16 +127,6 @@ run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   --conditions "$STUDY_DIR/reasoning_gate_conditions.json" \
   --self-names-json "$STUDY_DIR/dreidel-self-names/self_names.json" \
   --output-dir "$STUDY_DIR/dreidel-reasoning-gate" \
-  --image-ids "${dreidel_ids[@]}" \
-  "${COMMON[@]}" || exit $?
-
-# Repeat the fast and accuracy candidates at identical and alternate seeds.
-run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
-  python evaluate_qwen38_recipe.py \
-  --dataset-dir "$DREIDEL" \
-  --conditions "$STUDY_DIR/determinism_conditions.json" \
-  --self-names-json "$STUDY_DIR/dreidel-self-names/self_names.json" \
-  --output-dir "$STUDY_DIR/dreidel-determinism" \
   --image-ids "${dreidel_ids[@]}" \
   "${COMMON[@]}" || exit $?
 

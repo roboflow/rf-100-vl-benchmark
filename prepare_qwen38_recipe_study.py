@@ -165,14 +165,30 @@ def prepare_screen(args: argparse.Namespace) -> None:
     )
     rows = named + anonymous_single + anonymous_multi
     ranked = sorted(rows, key=lambda row: float(row["mAP50_95"]), reverse=True)
-    best_overall = efficient_best(ranked)
-    best_box = efficient_best([row for row in ranked if int(row["box_count"]) > 0])
-    best_numeric = efficient_best([row for row in ranked if row["representation"] == "numeric"])
-    best_drawn = efficient_best([row for row in ranked if row["representation"] == "drawn"])
-    best_anonymous = efficient_best(
-        [row for row in ranked if str(row["semantics"]).startswith("anonymous")]
+    noise_floor = json.loads(args.noise_floor.read_text())
+    margin = float(noise_floor["datasets"]["dreidel"]["metrics"]["AP"]["tie_threshold"])
+    best_overall = efficient_best(ranked, margin)
+    best_box = efficient_best(
+        [row for row in ranked if int(row["box_count"]) > 0], margin
     )
-    fast = efficient_best([row for row in ranked if int(row["calls_per_image"]) == 1 and int(row["box_count"]) == 0])
+    best_numeric = efficient_best(
+        [row for row in ranked if row["representation"] == "numeric"], margin
+    )
+    best_drawn = efficient_best(
+        [row for row in ranked if row["representation"] == "drawn"], margin
+    )
+    best_anonymous = efficient_best(
+        [row for row in ranked if str(row["semantics"]).startswith("anonymous")],
+        margin,
+    )
+    fast = efficient_best(
+        [
+            row
+            for row in ranked
+            if int(row["calls_per_image"]) == 1 and int(row["box_count"]) == 0
+        ],
+        margin,
+    )
 
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
@@ -183,8 +199,9 @@ def prepare_screen(args: argparse.Namespace) -> None:
         writer.writerows(ranked)
     selection = {
         "created_at": base.utc_now(),
-        "practical_equivalence_margin_mAP50_95": 1.0,
-        "selection_rule": "Within one mAP of the maximum, prefer fewer calls, then fewer tokens and lower latency.",
+        "residual_noise_floor_mAP50_95": margin,
+        "noise_floor_path": str(args.noise_floor.resolve()),
+        "selection_rule": "Within the measured residual noise floor of the maximum, prefer fewer calls, then fewer tokens and lower latency.",
         "best_overall": best_overall,
         "best_box": best_box,
         "best_numeric": best_numeric,
@@ -224,8 +241,12 @@ def prepare_finalists(args: argparse.Namespace) -> None:
     self_rows = normalize_recipe(
         read_rows(args.self_name_screen_summary), args.subset_size, "self_name_subset_screen"
     )
-    self_best = efficient_best(self_rows)
-    best_self = efficient_best([row for row in self_rows if str(row["semantics"]).startswith("self_name")])
+    margin = float(screen_selection["residual_noise_floor_mAP50_95"])
+    self_best = efficient_best(self_rows, margin)
+    best_self = efficient_best(
+        [row for row in self_rows if str(row["semantics"]).startswith("self_name")],
+        margin,
+    )
 
     legacy_rows = [
         screen_selection["fast"],
@@ -236,7 +257,9 @@ def prepare_finalists(args: argparse.Namespace) -> None:
     candidate_rows = legacy_rows + anonymous_candidates
     # Carry the best self-name arm if it is within one mAP of the best matched
     # subset control; otherwise it cannot be a practical winner.
-    if float(best_self["mAP50_95"]) >= max(float(row["mAP50_95"]) for row in self_rows) - 1.0:
+    if float(best_self["mAP50_95"]) >= max(
+        float(row["mAP50_95"]) for row in self_rows
+    ) - margin:
         candidate_rows.append(best_self)
     structural: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in candidate_rows:
@@ -263,16 +286,6 @@ def prepare_finalists(args: argparse.Namespace) -> None:
         study / "reasoning_gate_conditions.json",
         [top_none, top_low, fast_none, fast_low],
     )
-    determinism: list[Condition] = []
-    for label, row in (("top", top_row), ("fast", fast_row)):
-        determinism.extend(
-            [
-                condition_from_row(row, f"det_{label}_seed1234_a", seed=1234),
-                condition_from_row(row, f"det_{label}_seed1234_b", seed=1234),
-                condition_from_row(row, f"det_{label}_seed4321", seed=4321),
-            ]
-        )
-    write_conditions(study / "determinism_conditions.json", determinism)
     base.atomic_write_json(
         study / "finalist_selection.json",
         {
@@ -281,7 +294,6 @@ def prepare_finalists(args: argparse.Namespace) -> None:
             "best_self_name_arm": best_self,
             "finalists": [asdict(value) for value in finalists],
             "reasoning_gate": [asdict(value) for value in [top_none, top_low, fast_none, fast_low]],
-            "determinism": [asdict(value) for value in determinism],
         },
     )
 
@@ -293,6 +305,7 @@ def parse_args() -> argparse.Namespace:
     screen.add_argument("--named-summary", type=Path, required=True)
     screen.add_argument("--anonymous-single-summary", type=Path, required=True)
     screen.add_argument("--anonymous-multi-summary", type=Path, required=True)
+    screen.add_argument("--noise-floor", type=Path, required=True)
     screen.add_argument("--dreidel-annotations", type=Path, required=True)
     screen.add_argument("--orion-annotations", type=Path, required=True)
     screen.add_argument("--image-count", type=int, default=54)
