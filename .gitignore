@@ -19,3 +19,6 @@ __pycache__/
 /results_Cosmos3-Edge_basic/
 /cosmos_preflight_report.json
 /cosmos-preflight-*/
+
+# Resumable Qwen3.8-Max RF20-VL-FSOD prompt-mode experiments
+/qwen38-orion-runs/
