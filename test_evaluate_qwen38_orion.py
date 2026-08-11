@@ -121,6 +121,24 @@ def test_score_uses_max_dets_500(dataset):
     assert metrics["prediction_count"] == 1
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        Exception("APIError: <500> InternalError.Algo: inference engine abort"),
+        Exception("429 Too Many Requests"),
+        Exception("request timed out"),
+        Exception("connection reset"),
+    ],
+)
+def test_retryable_provider_errors_are_recognized(error):
+    assert qwen.retryable_error(error)
+
+
+def test_no_reasoning_is_an_explicit_supported_condition():
+    args = qwen.parse_args(["--reasoning-effort", "none"])
+    assert args.reasoning_effort == "none"
+
+
 def test_manifest_fails_closed_on_configuration_change(tmp_path, dataset):
     _, _, _, examples, negatives = dataset
     path = tmp_path / "manifest.json"

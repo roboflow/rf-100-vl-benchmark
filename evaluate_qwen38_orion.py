@@ -522,7 +522,24 @@ def retryable_error(error: Exception) -> bool:
         return True
     name = type(error).__name__.casefold()
     message = str(error).casefold()
-    return any(token in name or token in message for token in ("timeout", "connection"))
+    retryable_markers = (
+        "timeout",
+        "timed out",
+        "connection",
+        "rate limit",
+        "too many requests",
+        "internalerror.algo",
+        "<408>",
+        "<409>",
+        "<429>",
+        "<500>",
+        "<502>",
+        "<503>",
+        "<504>",
+    )
+    return any(
+        marker in name or marker in message for marker in retryable_markers
+    )
 
 
 def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
@@ -538,6 +555,9 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
             "reasoning_effort": settings["reasoning_effort"],
             "vl_high_resolution_images": settings["vl_high_resolution_images"],
         },
+        # DashScope queues traffic-burst throttles for up to 30 seconds instead
+        # of immediately returning a 429. Absolute RPM/TPM limits still apply.
+        extra_headers={"X-DashScope-Wait-Timeout": "30"},
     )
     parts: list[str] = []
     finish_reason = None
@@ -776,7 +796,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--max-completion-tokens", type=int, default=8192)
-    parser.add_argument("--reasoning-effort", choices=("low", "medium", "xhigh"), default="low")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "xhigh"),
+        default="low",
+    )
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
