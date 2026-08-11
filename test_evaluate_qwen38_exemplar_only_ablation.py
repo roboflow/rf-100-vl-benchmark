@@ -109,6 +109,24 @@ def test_minimal_protocol_has_no_semantic_detection_instruction():
         assert forbidden not in value
 
 
+def test_seven_and_ten_box_extension_is_a_complete_balanced_factorial():
+    original = exemplar.BOX_COUNTS
+    try:
+        exemplar.configure_box_counts((7, 10))
+        assert len(exemplar.CONDITIONS) == 8
+        assert {
+            (condition.instruction, condition.representation, condition.box_count)
+            for condition in exemplar.CONDITIONS
+        } == {
+            (instruction, representation, count)
+            for instruction in exemplar.INSTRUCTIONS
+            for representation in exemplar.REPRESENTATIONS
+            for count in (7, 10)
+        }
+    finally:
+        exemplar.configure_box_counts(original)
+
+
 def test_prepare_only_writes_resumable_contract(tmp_path):
     output = tmp_path / "exemplar-only"
     assert (

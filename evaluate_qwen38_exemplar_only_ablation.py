@@ -28,7 +28,9 @@ import evaluate_qwen38_orion as base
 
 MODEL_ID = "qwen3.8-max"
 PROMPT_VERSION = "qwen3.8-max-exemplar-only-box-v1"
-BOX_COUNTS = (1, 2, 5)
+SUPPORTED_BOX_COUNTS = (1, 2, 5, 7, 10)
+DEFAULT_BOX_COUNTS = (1, 2, 5)
+BOX_COUNTS = DEFAULT_BOX_COUNTS
 INSTRUCTIONS = ("explicit", "minimal")
 REPRESENTATIONS = ("numeric", "drawn")
 EXPLICIT_PROMPT = (
@@ -67,6 +69,28 @@ def build_conditions() -> tuple[Condition, ...]:
 CONDITIONS = build_conditions()
 CONDITIONS_BY_MODE = {condition.mode: condition for condition in CONDITIONS}
 MODES = tuple(CONDITIONS_BY_MODE)
+ALL_MODES = tuple(
+    f"{instruction}_{representation}_b{count:02d}"
+    for instruction in INSTRUCTIONS
+    for representation in REPRESENTATIONS
+    for count in SUPPORTED_BOX_COUNTS
+)
+
+
+def configure_box_counts(box_counts: Sequence[int]) -> None:
+    """Configure one invocation's factorial while keeping resumable manifests exact."""
+
+    normalized = tuple(dict.fromkeys(int(count) for count in box_counts))
+    if not normalized:
+        raise ValueError("At least one box count is required.")
+    unsupported = set(normalized) - set(SUPPORTED_BOX_COUNTS)
+    if unsupported:
+        raise ValueError(f"Unsupported box counts: {sorted(unsupported)}")
+    global BOX_COUNTS, CONDITIONS, CONDITIONS_BY_MODE, MODES
+    BOX_COUNTS = normalized
+    CONDITIONS = build_conditions()
+    CONDITIONS_BY_MODE = {condition.mode: condition for condition in CONDITIONS}
+    MODES = tuple(CONDITIONS_BY_MODE)
 
 
 def generic_output_contract() -> str:
@@ -386,7 +410,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-completion-tokens", type=int, default=8192)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--max-retries", type=int, default=3)
-    parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    parser.add_argument(
+        "--box-counts",
+        nargs="+",
+        type=int,
+        choices=SUPPORTED_BOX_COUNTS,
+        default=list(DEFAULT_BOX_COUNTS),
+    )
+    parser.add_argument("--modes", nargs="+", choices=ALL_MODES)
     parser.add_argument("--image-ids", nargs="+", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--limit-per-mode", type=int)
@@ -396,6 +427,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    configure_box_counts(args.box_counts)
     if args.concurrency < 1 or args.max_retries < 0:
         raise ValueError("Concurrency must be positive and retries nonnegative.")
     if args.requests_per_minute <= 0 or args.tokens_per_minute <= 0:
@@ -434,7 +466,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     token_estimates = build_token_estimates()
     all_tasks = build_tasks(test, categories)
-    selected_modes = set(args.modes)
+    selected_modes = set(args.modes or MODES)
+    unknown_selected_modes = selected_modes - set(MODES)
+    if unknown_selected_modes:
+        raise ValueError(
+            "Selected modes do not belong to the configured box counts: "
+            f"{sorted(unknown_selected_modes)}"
+        )
     tasks = [task for task in all_tasks if task.mode in selected_modes]
     if args.image_ids is not None:
         requested = set(args.image_ids)
