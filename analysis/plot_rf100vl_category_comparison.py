@@ -89,7 +89,7 @@ COLORS = {
 }
 
 
-def style_axis(axis: plt.Axes, *, ymax: float) -> None:
+def style_axis(axis: plt.Axes, *, ymax: float, all_position: float) -> None:
     axis.set_facecolor(COLORS["paper"])
     axis.set_ylim(0, ymax)
     axis.set_ylabel("Average precision (%)", color=COLORS["ink"], fontweight="bold")
@@ -99,7 +99,12 @@ def style_axis(axis: plt.Axes, *, ymax: float) -> None:
     axis.spines["bottom"].set_color(COLORS["grid"])
     axis.tick_params(axis="y", colors=COLORS["muted"], length=0)
     axis.tick_params(axis="x", colors=COLORS["ink"], length=0, pad=10)
-    axis.axvspan(6.55, 7.45, color=COLORS["all_band"], zorder=0)
+    axis.axvspan(
+        all_position - 0.52,
+        all_position + 0.52,
+        color=COLORS["all_band"],
+        zorder=0,
+    )
 
 
 def label_bars(axis: plt.Axes, bars, *, decimals: int = 1) -> None:
@@ -114,7 +119,7 @@ def label_bars(axis: plt.Axes, bars, *, decimals: int = 1) -> None:
             va="bottom",
             fontsize=8.5,
             color=COLORS["ink"],
-            fontweight="semibold",
+            fontweight="bold",
         )
 
 
@@ -157,15 +162,15 @@ def main() -> None:
     figure, (comparison_axis, cosmos_axis) = plt.subplots(
         2,
         1,
-        figsize=(15.2, 10.2),
-        gridspec_kw={"height_ratios": [1.15, 0.85], "hspace": 0.48},
+        figsize=(18, 13.5),
+        gridspec_kw={"height_ratios": [1.05, 1.0], "hspace": 0.72},
         facecolor=COLORS["paper"],
     )
-    figure.subplots_adjust(left=0.07, right=0.985, top=0.86, bottom=0.12)
+    figure.subplots_adjust(left=0.065, right=0.985, top=0.85, bottom=0.12)
 
     figure.suptitle(
         "RF100-VL · Class Names Only",
-        x=0.07,
+        x=0.065,
         y=0.965,
         ha="left",
         fontsize=23,
@@ -173,7 +178,7 @@ def main() -> None:
         color=COLORS["ink"],
     )
     figure.text(
-        0.07,
+        0.065,
         0.925,
         "Category-level object detection accuracy · macro average over datasets · higher is better",
         ha="left",
@@ -181,26 +186,23 @@ def main() -> None:
         color=COLORS["muted"],
     )
 
-    x_positions = np.arange(len(CATEGORIES))
-    display_names = [
-        "Flora &\nFauna" if name == "Flora & Fauna" else name
-        for name in CATEGORIES
-    ]
+    x_positions = np.arange(len(CATEGORIES)) * 1.18
     tick_labels = [
-        f"{name}\n{count} datasets"
-        for name, count in zip(display_names, DATASET_COUNTS)
+        f"{name}\n(n={count})"
+        for name, count in zip(CATEGORIES, DATASET_COUNTS)
     ]
 
-    style_axis(comparison_axis, ymax=21.5)
+    style_axis(comparison_axis, ymax=22.0, all_position=x_positions[-1])
     comparison_axis.set_title(
         "A. Model comparison · mAP50–95",
         loc="left",
         color=COLORS["ink"],
-        pad=14,
+        y=1.17,
+        pad=0,
     )
     comparison_axis.text(
         1.0,
-        1.055,
+        1.17,
         "Comparable metric reported for all four models",
         transform=comparison_axis.transAxes,
         ha="right",
@@ -250,25 +252,26 @@ def main() -> None:
     label_bars(comparison_axis, super_bars)
     comparison_axis.set_xticks(x_positions, tick_labels)
     comparison_axis.legend(
-        loc="upper left",
+        loc="lower left",
         ncols=4,
         frameon=False,
-        bbox_to_anchor=(0.0, 1.01),
+        bbox_to_anchor=(0.0, 1.025),
         borderaxespad=0,
         columnspacing=1.8,
         handlelength=1.3,
     )
 
-    style_axis(cosmos_axis, ymax=37.5)
+    style_axis(cosmos_axis, ymax=38.5, all_position=x_positions[-1])
     cosmos_axis.set_title(
         "B. Cosmos3 family detail · mAP50 versus mAP50–95",
         loc="left",
         color=COLORS["ink"],
-        pad=14,
+        y=1.17,
+        pad=0,
     )
     cosmos_axis.text(
         1.0,
-        1.055,
+        1.17,
         "Same prompts and scoring for Edge and Super",
         transform=cosmos_axis.transAxes,
         ha="right",
@@ -280,7 +283,7 @@ def main() -> None:
         x_positions - 1.5 * cosmos_width,
         COSMOS_EDGE_MAP50,
         cosmos_width,
-        label="Cosmos3-Edge mAP50",
+        label="Edge · mAP50",
         color=COLORS["edge_light"],
         edgecolor="none",
         zorder=3,
@@ -289,7 +292,7 @@ def main() -> None:
         x_positions - 0.5 * cosmos_width,
         COSMOS_EDGE_MAP,
         cosmos_width,
-        label="Cosmos3-Edge mAP50–95",
+        label="Edge · mAP50–95",
         color=COLORS["edge"],
         edgecolor="none",
         zorder=3,
@@ -298,7 +301,7 @@ def main() -> None:
         x_positions + 0.5 * cosmos_width,
         COSMOS_SUPER_MAP50,
         cosmos_width,
-        label="Cosmos3-Super mAP50",
+        label="Super · mAP50",
         color=COLORS["super_light"],
         edgecolor="none",
         zorder=3,
@@ -307,7 +310,7 @@ def main() -> None:
         x_positions + 1.5 * cosmos_width,
         COSMOS_SUPER_MAP,
         cosmos_width,
-        label="Cosmos3-Super mAP50–95",
+        label="Super · mAP50–95",
         color=COLORS["super"],
         edgecolor="none",
         zorder=3,
@@ -318,35 +321,40 @@ def main() -> None:
     label_bars(cosmos_axis, super_map_bars)
     cosmos_axis.set_xticks(x_positions, tick_labels)
     cosmos_axis.legend(
-        loc="upper left",
+        loc="lower left",
         ncols=4,
         frameon=False,
-        bbox_to_anchor=(0.0, 1.01),
+        bbox_to_anchor=(0.0, 1.025),
         borderaxespad=0,
         columnspacing=1.8,
         handlelength=1.3,
     )
 
     figure.text(
-        0.07,
-        0.045,
+        0.5,
+        0.052,
         "Evaluation: pycocotools · maxDets=500 · multi-class prompts · no few-shot examples or annotator instructions",
-        ha="left",
+        ha="center",
         fontsize=9.5,
         color=COLORS["muted"],
     )
     figure.text(
-        0.985,
-        0.045,
+        0.5,
+        0.027,
         "Qwen/Gemini: RF100-VL paper, Table 2  ·  Cosmos3: verified 100-dataset runs",
-        ha="right",
+        ha="center",
         fontsize=9.5,
         color=COLORS["muted"],
     )
 
     OUTPUT_STEM.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(OUTPUT_STEM.with_suffix(".png"), dpi=240, facecolor=figure.get_facecolor())
-    figure.savefig(OUTPUT_STEM.with_suffix(".svg"), facecolor=figure.get_facecolor())
+    png_path = OUTPUT_STEM.with_suffix(".png")
+    svg_path = OUTPUT_STEM.with_suffix(".svg")
+    figure.savefig(png_path, dpi=240, facecolor=figure.get_facecolor())
+    figure.savefig(svg_path, facecolor=figure.get_facecolor())
+    svg_path.write_text(
+        "\n".join(line.rstrip() for line in svg_path.read_text().splitlines()) + "\n"
+    )
     plt.close(figure)
 
 
