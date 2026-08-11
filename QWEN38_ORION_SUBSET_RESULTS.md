@@ -16,6 +16,24 @@ the nested five-image run and 60 were new API calls.
 All metrics use pycocotools with `maxDets=[1, 10, 500]`. Values below are
 percentages.
 
+## 59-image selected-strategy comparison
+
+| Prompt mode | Reasoning | Calls/image | mAP50-95 | mAP50 |
+|---|---|---:|---:|---:|
+| Multi-class names | None | 1 | 14.44 | 26.56 |
+| Positive numeric boxes, per class | None | 8 | **23.46** | **49.50** |
+| Positive + negative numeric boxes, per class | None | 8 | 22.21 | 47.33 |
+| Positive drawn boxes, per class | None | 8 | 21.56 | 47.18 |
+| Multi-class positive numeric boxes, one call | None | 1 | 14.89 | 36.93 |
+| Multi-class positive numeric boxes, one call | Low | 1 | 16.72 | 39.26 |
+
+The original full runs supplied the first four fingerprinted configurations.
+The combined numeric run completed all 59 records in both reasoning conditions,
+reusing the matching 20-image records and inferring only the remaining 39 per
+condition. Positive numeric boxes per class with reasoning off remain the
+accuracy-first recipe. Low reasoning improves the one-call visual-reference
+recipe, but it remains below the per-class recipe.
+
 ## 20-image stratified subset
 
 | Prompt mode | Reasoning | mAP50-95 | mAP50 |
