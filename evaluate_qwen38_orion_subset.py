@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Qwen3.8-Max prompt modes on a fixed five-image Orion subset.
+"""Compare Qwen3.8-Max prompt modes on fixed Orion subsets.
 
 The existing six modes are rescored from their completed full-test records,
 without making new API calls. Two missing modes are then evaluated:
@@ -28,8 +28,22 @@ from typing import Any, Sequence
 
 import evaluate_qwen38_orion as base
 
-SUBSET_VERSION = "orion-five-image-all-class-v1"
-SUBSET_IMAGE_IDS = (36, 2, 27, 30, 0)
+SUBSET_IMAGE_IDS_BY_NAME = {
+    "five": (36, 2, 27, 30, 0),
+    # The original five plus 15 additions selected without model predictions
+    # to closely match the full test set's class-frequency distribution.
+    "twenty": (
+        36, 2, 27, 30, 0, 19, 51, 43, 50, 1,
+        25, 38, 45, 33, 26, 14, 22, 41, 35, 32,
+    ),
+}
+SUBSET_VERSION_BY_NAME = {
+    "five": "orion-five-image-all-class-v1",
+    "twenty": "orion-twenty-image-stratified-v1",
+}
+FIVE_RUN_DIRECTORY = Path(
+    "qwen38-orion-runs/orion-five-image-single-prompt-v1"
+)
 NEW_MODES = (
     "multi_class_positive_numeric",
     "multi_class_positive_drawn",
@@ -43,8 +57,10 @@ DEFAULT_FULL_RUNS = {
 LOGGER = logging.getLogger("qwen38_orion_subset")
 
 
-def subset_ground_truth(test: dict[str, Any]) -> dict[str, Any]:
-    selected = set(SUBSET_IMAGE_IDS)
+def subset_ground_truth(
+    test: dict[str, Any], image_ids: Sequence[int]
+) -> dict[str, Any]:
+    selected = set(image_ids)
     images_by_id = {int(image["id"]): image for image in test["images"]}
     missing = selected - set(images_by_id)
     if missing:
@@ -54,7 +70,7 @@ def subset_ground_truth(test: dict[str, Any]) -> dict[str, Any]:
         for key, value in test.items()
         if key not in {"images", "annotations"}
     }
-    result["images"] = [images_by_id[image_id] for image_id in SUBSET_IMAGE_IDS]
+    result["images"] = [images_by_id[image_id] for image_id in image_ids]
     result["annotations"] = [
         annotation
         for annotation in test["annotations"]
@@ -69,7 +85,9 @@ def subset_ground_truth(test: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def build_tasks(test: dict[str, Any]) -> list[base.Task]:
+def build_tasks(
+    test: dict[str, Any], image_ids: Sequence[int]
+) -> list[base.Task]:
     images = {int(image["id"]): image for image in test["images"]}
     return [
         base.Task(
@@ -80,7 +98,7 @@ def build_tasks(test: dict[str, Any]) -> list[base.Task]:
             height=int(images[image_id]["height"]),
         )
         for mode in NEW_MODES
-        for image_id in SUBSET_IMAGE_IDS
+        for image_id in image_ids
     ]
 
 
@@ -135,10 +153,12 @@ def build_multi_reference_messages(
     return [{"role": "user", "content": content}]
 
 
-def filtered_predictions(full_run: Path, mode: str) -> list[dict[str, Any]]:
+def filtered_predictions(
+    full_run: Path, mode: str, image_ids: Sequence[int]
+) -> list[dict[str, Any]]:
     path = full_run / "predictions" / f"{mode}.json"
     predictions = json.loads(path.read_text(encoding="utf-8"))
-    selected = set(SUBSET_IMAGE_IDS)
+    selected = set(image_ids)
     return [
         prediction
         for prediction in predictions
@@ -156,10 +176,12 @@ def score_all_modes(
     effort: str,
     tasks: Sequence[base.Task],
     full_run: Path,
+    image_ids: Sequence[int],
+    subset_version: str,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for mode in base.MODES:
-        predictions = filtered_predictions(full_run, mode)
+        predictions = filtered_predictions(full_run, mode, image_ids)
         metrics = base.score_coco(ground_truth_path, predictions)
         predictions_path = output_directory / effort / "predictions" / f"{mode}.json"
         base.atomic_write_json(predictions_path, predictions)
@@ -181,7 +203,7 @@ def score_all_modes(
             if record and status in base.TERMINAL_STATUSES:
                 predictions.extend(record.get("predictions", []))
         complete = sum(statuses.get(status, 0) for status in base.TERMINAL_STATUSES) == len(
-            SUBSET_IMAGE_IDS
+            image_ids
         )
         predictions_path = output_directory / effort / "predictions" / f"{mode}.json"
         base.atomic_write_json(predictions_path, predictions)
@@ -198,8 +220,8 @@ def score_all_modes(
             {"mode": mode, **mode_summary},
         )
     summary = {
-        "subset_version": SUBSET_VERSION,
-        "image_ids": list(SUBSET_IMAGE_IDS),
+        "subset_version": subset_version,
+        "image_ids": list(image_ids),
         "reasoning_effort": effort,
         "modes": result,
     }
@@ -208,7 +230,10 @@ def score_all_modes(
 
 
 def write_comparison(
-    output_directory: Path, summaries: dict[str, dict[str, Any]]
+    output_directory: Path,
+    summaries: dict[str, dict[str, Any]],
+    image_ids: Sequence[int],
+    subset_version: str,
 ) -> None:
     rows = []
     for effort in REASONING_EFFORTS:
@@ -229,8 +254,8 @@ def write_comparison(
     base.atomic_write_json(
         output_directory / "comparison_summary.json",
         {
-            "subset_version": SUBSET_VERSION,
-            "image_ids": list(SUBSET_IMAGE_IDS),
+            "subset_version": subset_version,
+            "image_ids": list(image_ids),
             "rows": rows,
         },
     )
@@ -247,6 +272,11 @@ def write_comparison(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--subset",
+        choices=tuple(SUBSET_IMAGE_IDS_BY_NAME),
+        default="five",
+    )
+    parser.add_argument(
         "--dataset-dir",
         type=Path,
         default=Path("RF100VL/rf20-vl-fsod/orionproducts"),
@@ -254,7 +284,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("qwen38-orion-runs/orion-five-image-single-prompt-v1"),
+        help="Defaults to a subset-specific directory under qwen38-orion-runs.",
     )
     parser.add_argument("--model", default=base.MODEL_ID)
     parser.add_argument(
@@ -284,7 +314,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("DASHSCOPE_API_KEY is required for inference.")
 
     dataset_directory = args.dataset_dir.resolve()
-    output_directory = args.output_dir.resolve()
+    image_ids = SUBSET_IMAGE_IDS_BY_NAME[args.subset]
+    subset_version = SUBSET_VERSION_BY_NAME[args.subset]
+    default_output = Path(
+        f"qwen38-orion-runs/orion-{args.subset}-image-single-prompt-v1"
+    )
+    output_directory = (args.output_dir or default_output).resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -304,17 +339,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     assets = base.prepare_reference_assets(
         train_directory, output_directory / "references", examples, negative_ids
     )
-    subset = subset_ground_truth(test)
+    subset = subset_ground_truth(test, image_ids)
     ground_truth_path = output_directory / "subset_ground_truth.json"
     base.atomic_write_json(ground_truth_path, subset)
-    tasks = build_tasks(test)
+    tasks = build_tasks(test, image_ids)
 
     manifest = {
-        "subset_version": SUBSET_VERSION,
-        "image_ids": list(SUBSET_IMAGE_IDS),
-        "existing_mode_task_equivalent": len(SUBSET_IMAGE_IDS)
+        "subset_version": subset_version,
+        "image_ids": list(image_ids),
+        "existing_mode_task_equivalent": len(image_ids)
         * (1 + len(base.SINGLE_CLASS_MODES) * len(categories)),
         "new_api_request_count": len(tasks) * len(args.reasoning_efforts),
+        "reused_nested_request_count": (
+            len(SUBSET_IMAGE_IDS_BY_NAME["five"])
+            * len(NEW_MODES)
+            * len(args.reasoning_efforts)
+            if args.subset == "twenty"
+            else 0
+        ),
         "new_modes": list(NEW_MODES),
         "reasoning_efforts": list(args.reasoning_efforts),
         "reference_examples": {
@@ -324,13 +366,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     base.atomic_write_json(output_directory / "run_manifest.json", manifest)
 
+    # The 20-image subset is nested. Copy only fingerprint-identical terminal
+    # records from the completed five-image run before deciding what is pending.
+    if args.subset == "twenty":
+        for effort in args.reasoning_efforts:
+            settings = {
+                "model": args.model,
+                "base_url": args.base_url.rstrip("/"),
+                "seed": args.seed,
+                "max_completion_tokens": args.max_completion_tokens,
+                "reasoning_effort": effort,
+                "vl_high_resolution_images": False,
+                "timeout_seconds": args.timeout_seconds,
+            }
+            for task in tasks:
+                if task.image_id not in SUBSET_IMAGE_IDS_BY_NAME["five"]:
+                    continue
+                destination = record_path(output_directory, effort, task)
+                if destination.is_file():
+                    continue
+                source = record_path(FIVE_RUN_DIRECTORY.resolve(), effort, task)
+                existing = base.load_record(source)
+                if not existing or existing.get("status") not in base.TERMINAL_STATUSES:
+                    raise ValueError(f"Reusable nested checkpoint is missing: {source}")
+                messages = build_multi_reference_messages(
+                    task, test_directory, categories, examples, assets
+                )
+                expected = base.request_fingerprint(
+                    task, base.request_summary(messages), settings
+                )
+                if existing.get("request_fingerprint") != expected:
+                    raise ValueError(f"Reusable checkpoint fingerprint mismatch: {source}")
+                base.atomic_write_json(destination, existing)
+
     summaries = {}
     for effort in args.reasoning_efforts:
         full_run = DEFAULT_FULL_RUNS[effort].resolve()
         summaries[effort] = score_all_modes(
-            output_directory, ground_truth_path, effort, tasks, full_run
+            output_directory,
+            ground_truth_path,
+            effort,
+            tasks,
+            full_run,
+            image_ids,
+            subset_version,
         )
-    write_comparison(output_directory, summaries)
+    write_comparison(output_directory, summaries, image_ids, subset_version)
     if args.prepare_only:
         LOGGER.info("Prepared and rescored the fixed subset without API calls.")
         return 0
@@ -406,12 +487,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             effort,
             tasks,
             DEFAULT_FULL_RUNS[effort].resolve(),
+            image_ids,
+            subset_version,
         )
         summaries[effort] = summary
         for mode in NEW_MODES:
             statuses = summary["modes"][mode]["statuses"]
             unresolved += statuses.get("missing", 0) + statuses.get("error", 0)
-    write_comparison(output_directory, summaries)
+    write_comparison(output_directory, summaries, image_ids, subset_version)
     return 0 if unresolved == 0 else 2
 
 

@@ -18,9 +18,10 @@ def load_fixture():
 
 def test_fixed_subset_is_five_images_and_contains_every_class():
     _, test, categories, _, _ = load_fixture()
-    ground_truth = subset.subset_ground_truth(test)
+    image_ids = subset.SUBSET_IMAGE_IDS_BY_NAME["five"]
+    ground_truth = subset.subset_ground_truth(test, image_ids)
     assert [image["id"] for image in ground_truth["images"]] == list(
-        subset.SUBSET_IMAGE_IDS
+        image_ids
     )
     assert len(ground_truth["images"]) == 5
     assert {annotation["category_id"] for annotation in ground_truth["annotations"]} == set(
@@ -34,7 +35,7 @@ def test_multi_reference_messages_have_eight_references_and_target_last(tmp_path
     assets = base.prepare_reference_assets(
         DATASET / "train", tmp_path / "references", examples, negatives
     )
-    tasks = subset.build_tasks(test)
+    tasks = subset.build_tasks(test, subset.SUBSET_IMAGE_IDS_BY_NAME["five"])
     for task in tasks:
         messages = subset.build_multi_reference_messages(
             task, DATASET / "test", categories, examples, assets
@@ -73,3 +74,28 @@ def test_prepare_only_rescores_existing_modes_and_makes_no_api_calls(tmp_path):
     comparison = json.loads((output / "comparison_summary.json").read_text())
     assert len(comparison["rows"]) == 16
     assert (output / "comparison_summary.csv").is_file()
+
+
+def test_twenty_image_subset_is_nested_representative_and_reuses_five(tmp_path):
+    _, test, categories, _, _ = load_fixture()
+    five = subset.SUBSET_IMAGE_IDS_BY_NAME["five"]
+    twenty = subset.SUBSET_IMAGE_IDS_BY_NAME["twenty"]
+    assert len(twenty) == 20
+    assert twenty[: len(five)] == five
+    ground_truth = subset.subset_ground_truth(test, twenty)
+    assert {annotation["category_id"] for annotation in ground_truth["annotations"]} == set(
+        categories
+    )
+    output = tmp_path / "twenty"
+    assert subset.main([
+        "--subset", "twenty",
+        "--output-dir", str(output),
+        "--prepare-only",
+    ]) == 0
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["existing_mode_task_equivalent"] == 820
+    assert manifest["new_api_request_count"] == 80
+    assert manifest["reused_nested_request_count"] == 20
+    for effort in subset.REASONING_EFFORTS:
+        for mode in subset.NEW_MODES:
+            assert len(list((output / effort / "records" / mode).glob("*.json"))) == 5
