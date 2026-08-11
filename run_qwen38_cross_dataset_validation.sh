@@ -6,6 +6,8 @@ if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
   exit 1
 fi
 
+UV_BIN=${UV_BIN:-/home/matveipopov/.local/bin/uv}
+
 run_resumable() {
   local attempt status
   for attempt in 1 2 3 4; do
@@ -25,7 +27,7 @@ run_dataset() {
   local base_dir="qwen38-fsod-runs/${run_name}-selected-base-v1"
   local combined_dir="qwen38-fsod-runs/${run_name}-selected-combined-v1"
 
-  run_resumable uv run --with-requirements requirements-cosmos.txt \
+  run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
     python evaluate_qwen38_orion.py \
     --dataset-dir "$dataset_dir" \
     --negative-pairs-file "$pair_file" \
@@ -40,7 +42,7 @@ run_dataset() {
     --max-completion-tokens 8192 \
     --max-retries 3 || return
 
-  run_resumable uv run --with-requirements requirements-cosmos.txt \
+  run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
     python evaluate_qwen38_orion_subset.py \
     --subset full \
     --dataset-dir "$dataset_dir" \
