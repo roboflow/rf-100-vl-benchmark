@@ -601,6 +601,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--max-completion-tokens", type=int, default=8192)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        help=(
+            "Explicit sampling temperature. Omit to preserve provider-default "
+            "behavior in established exploratory runs."
+        ),
+    )
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
     parser.add_argument("--image-ids", nargs="+", type=int)
@@ -624,6 +632,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("Concurrency must be positive and retries nonnegative.")
     if args.requests_per_minute <= 0 or args.tokens_per_minute <= 0:
         raise ValueError("RPM and TPM limits must be positive.")
+    if args.temperature is not None and not 0 <= args.temperature < 2:
+        raise ValueError("Temperature must be in [0, 2).")
     if args.limit is not None and args.limit_per_mode is not None:
         raise ValueError("--limit and --limit-per-mode are mutually exclusive.")
     if not os.getenv("DASHSCOPE_API_KEY") and not args.prepare_only:
@@ -677,6 +687,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "vl_high_resolution_images": False,
         "timeout_seconds": args.timeout_seconds,
     }
+    if args.temperature is not None:
+        settings["temperature"] = args.temperature
     configuration = {
         "dataset_directory": str(dataset_directory),
         "train_annotation_sha256": base.sha256_file(train_path),

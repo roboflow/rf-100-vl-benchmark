@@ -139,6 +139,40 @@ def test_no_reasoning_is_an_explicit_supported_condition():
     assert args.reasoning_effort == "none"
 
 
+def test_temperature_zero_is_an_explicit_supported_condition():
+    args = qwen.parse_args(["--temperature", "0"])
+    assert args.temperature == 0.0
+
+
+def test_stream_request_sends_temperature_only_when_configured():
+    class Completions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return iter(())
+
+    class Client:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": Completions()})()
+
+    settings = {
+        "model": "qwen3.8-max",
+        "seed": 1234,
+        "max_completion_tokens": 8192,
+        "reasoning_effort": "none",
+        "vl_high_resolution_images": False,
+    }
+    client = Client()
+    messages = [{"role": "user", "content": "test"}]
+    qwen.stream_inference(client, messages, settings)
+    assert "temperature" not in client.chat.completions.calls[0]
+
+    qwen.stream_inference(client, messages, {**settings, "temperature": 0.0})
+    assert client.chat.completions.calls[1]["temperature"] == 0.0
+
+
 def test_negative_pair_map_can_be_supplied_for_another_fsod_dataset():
     dataset_path = Path("RF100VL/rf20-vl-fsod/lacrosse-object-detection")
     test = qwen.load_coco(dataset_path / "test/_annotations.coco.json")

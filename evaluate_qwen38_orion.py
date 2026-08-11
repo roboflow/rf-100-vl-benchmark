@@ -624,6 +624,9 @@ def retryable_error(error: Exception) -> bool:
 
 def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
+    sampling_parameters = {}
+    if settings.get("temperature") is not None:
+        sampling_parameters["temperature"] = settings["temperature"]
     stream = client.chat.completions.create(
         model=settings["model"],
         messages=messages,
@@ -631,6 +634,7 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
         stream_options={"include_usage": True},
         seed=settings["seed"],
         max_completion_tokens=settings["max_completion_tokens"],
+        **sampling_parameters,
         extra_body={
             "reasoning_effort": settings["reasoning_effort"],
             "vl_high_resolution_images": settings["vl_high_resolution_images"],
@@ -923,6 +927,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="low",
     )
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        help=(
+            "Explicit sampling temperature. Omit to preserve provider-default "
+            "behavior in established exploratory runs."
+        ),
+    )
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
     parser.add_argument("--image-ids", nargs="+", type=int, help="Run only these test image IDs.")
@@ -943,6 +955,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("Concurrency must be positive and retries nonnegative.")
     if args.requests_per_minute <= 0 or args.tokens_per_minute <= 0:
         raise ValueError("RPM and TPM targets must be positive.")
+    if args.temperature is not None and not 0 <= args.temperature < 2:
+        raise ValueError("Temperature must be in [0, 2).")
     if args.limit is not None and args.limit_per_mode is not None:
         raise ValueError("--limit and --limit-per-mode are mutually exclusive.")
     if args.limit is not None and args.limit < 0:
@@ -1008,6 +1022,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "vl_high_resolution_images": False,
         "timeout_seconds": args.timeout_seconds,
     }
+    if args.temperature is not None:
+        settings["temperature"] = args.temperature
     configuration = {
         "dataset_directory": str(dataset_directory),
         "train_annotation_sha256": sha256_file(train_path),
