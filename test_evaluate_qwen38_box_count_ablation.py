@@ -7,6 +7,7 @@ import evaluate_qwen38_box_count_ablation as ablation
 import evaluate_qwen38_orion as base
 
 DATASET = Path("RF100VL/rf20-vl-fsod/the-dreidel-project")
+ORION = Path("RF100VL/rf20-vl-fsod/orionproducts")
 
 
 @pytest.fixture(scope="module")
@@ -59,6 +60,25 @@ def test_reference_order_is_nested_deterministic_and_starts_with_prior_rule(data
         assert sequence[:2] == sequence[:3][:2]
         assert sequence[:3] == sequence[:5][:3]
         assert sequence[:5] == sequence[:10][:5]
+
+
+def test_instance_based_reference_selection_supports_orion_ten_shot():
+    train = base.load_coco(ORION / "train/_annotations.coco.json")
+    references = ablation.select_reference_sequences(
+        train,
+        ORION / "train",
+        distinct_images_only=False,
+    )
+    assert len(references) == 8
+    assert all(len(sequence) == 10 for sequence in references.values())
+    assert all(
+        len({reference.annotation_id for reference in sequence}) == 10
+        for sequence in references.values()
+    )
+    assert any(
+        len({reference.image_id for reference in sequence}) < 10
+        for sequence in references.values()
+    )
 
 
 def test_condition_and_task_matrix_is_complete_and_unique(dataset):

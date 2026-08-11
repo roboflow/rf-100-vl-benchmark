@@ -670,6 +670,7 @@ def execute_task(
     max_retries: int,
     rate_limiter: SmoothDualRateLimiter | None = None,
     messages_override: list[dict[str, Any]] | None = None,
+    force_single_category_labels: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     messages = (
@@ -725,6 +726,19 @@ def execute_task(
                     "elapsed_seconds": time.monotonic() - started,
                     "completed_at": utc_now(),
                 }
+            if force_single_category_labels:
+                if task.category_id is None:
+                    raise ValueError(
+                        "Forced category mapping requires a single-class task."
+                    )
+                # Exemplar-only prompts intentionally never reveal the semantic
+                # class name. Since every request targets exactly one held-out
+                # class, assign every parsed box to that externally known class
+                # before applying the shared geometry and deduplication logic.
+                detections = [
+                    {**detection, "label": categories[task.category_id]}
+                    for detection in detections
+                ]
             allowed_categories = (
                 categories
                 if task.category_id is None

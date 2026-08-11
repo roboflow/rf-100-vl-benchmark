@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Ablate positive box-reference count for Qwen3.8-Max on RF20-VL-FSOD.
+"""Evaluate semantic-label-free box exemplars with Qwen3.8-Max.
 
-The experiment is a nested 0/1/2/3/5/10-shot comparison. Zero-shot controls
-use class names only. Positive-reference conditions cross numeric versus drawn
-boxes with single-class versus multi-class requests. Every nonzero count is the
-number of train-only reference boxes per class. Predictions are evaluated on
-the complete test split with the repository's COCO maxDets=500 scorer.
+Every request is single-class, but the model is never shown that class's name.
+The explicit conditions ask for objects of the same kind as the marked example.
+The minimal conditions supply only the reference image/box payload, target image,
+and a label-free output protocol. Parsed boxes are assigned to the task's hidden
+category externally before standard COCO maxDets=500 scoring.
 """
 
 from __future__ import annotations
@@ -16,71 +16,52 @@ import csv
 import fcntl
 import json
 import logging
-import math
 import os
 import threading
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import fmean
 from typing import Any
 
+import evaluate_qwen38_box_count_ablation as box_ablation
 import evaluate_qwen38_orion as base
 
 MODEL_ID = "qwen3.8-max"
-PROMPT_VERSION = "qwen3.8-max-positive-box-count-v1"
-BOX_COUNTS = (1, 2, 3, 5, 10)
-FORMULATIONS = ("multi", "single")
+PROMPT_VERSION = "qwen3.8-max-exemplar-only-box-v1"
+BOX_COUNTS = (1, 2, 5)
+INSTRUCTIONS = ("explicit", "minimal")
 REPRESENTATIONS = ("numeric", "drawn")
+EXPLICIT_PROMPT = (
+    "Find every object in the target image that is the same kind as the object "
+    "marked in the reference image."
+)
 DEFAULT_DATASET = Path("RF100VL/rf20-vl-fsod/the-dreidel-project")
-DEFAULT_OUTPUT = Path("qwen38-fsod-runs/dreidel-box-count-ablation-v1")
+DEFAULT_OUTPUT = Path("qwen38-fsod-runs/dreidel-exemplar-only-box-v1")
 TERMINAL_STATUSES = base.TERMINAL_STATUSES
 
-LOGGER = logging.getLogger("qwen38_box_count")
+LOGGER = logging.getLogger("qwen38_exemplar_only")
 
 
 @dataclass(frozen=True)
 class Condition:
     mode: str
-    formulation: str
-    representation: str | None
+    instruction: str
+    representation: str
     box_count: int
-
-    @property
-    def single_class(self) -> bool:
-        return self.formulation == "single"
-
-
-@dataclass(frozen=True)
-class ReferenceBox:
-    category_id: int
-    category_name: str
-    rank: int
-    annotation_id: int
-    image_id: int
-    file_name: str
-    width: int
-    height: int
-    bbox_xyxy_1000: tuple[int, int, int, int]
 
 
 def build_conditions() -> tuple[Condition, ...]:
-    result = [
-        Condition("multi_names_b00", "multi", None, 0),
-        Condition("single_names_b00", "single", None, 0),
-    ]
-    for formulation in FORMULATIONS:
-        for representation in REPRESENTATIONS:
-            for count in BOX_COUNTS:
-                result.append(
-                    Condition(
-                        f"{formulation}_{representation}_b{count:02d}",
-                        formulation,
-                        representation,
-                        count,
-                    )
-                )
-    return tuple(result)
+    return tuple(
+        Condition(
+            mode=f"{instruction}_{representation}_b{count:02d}",
+            instruction=instruction,
+            representation=representation,
+            box_count=count,
+        )
+        for instruction in INSTRUCTIONS
+        for representation in REPRESENTATIONS
+        for count in BOX_COUNTS
+    )
 
 
 CONDITIONS = build_conditions()
@@ -88,177 +69,24 @@ CONDITIONS_BY_MODE = {condition.mode: condition for condition in CONDITIONS}
 MODES = tuple(CONDITIONS_BY_MODE)
 
 
-def _crop_feature(image_path: Path, bbox: Sequence[float]) -> tuple[float, ...]:
-    """Return a small deterministic appearance descriptor for diversity ordering."""
-
-    from PIL import Image
-
-    x, y, width, height = (float(value) for value in bbox)
-    with Image.open(image_path) as opened:
-        image = opened.convert("RGB")
-        left = max(0, math.floor(x))
-        top = max(0, math.floor(y))
-        right = min(image.width, math.ceil(x + width))
-        bottom = min(image.height, math.ceil(y + height))
-        if right <= left or bottom <= top:
-            raise ValueError(f"Degenerate reference crop in {image_path}: {bbox}")
-        crop = image.crop((left, top, right, bottom)).resize((16, 16))
-        return tuple(channel / 255.0 for channel in crop.tobytes())
+def generic_output_contract() -> str:
+    return (
+        "Return only a JSON list exactly like "
+        '[{"bbox_2d":[x1,y1,x2,y2],"label":"object"}]. '
+        "Use XYXY integer coordinates normalized independently from 0 to 1000 "
+        "relative to the target image, with the origin at top-left. Return [] "
+        "if none are present."
+    )
 
 
-def _squared_distance(left: Sequence[float], right: Sequence[float]) -> float:
-    return math.fsum((a - b) ** 2 for a, b in zip(left, right))
-
-
-def select_reference_sequences(
-    train: dict[str, Any],
-    train_directory: Path,
-    *,
-    required_count: int = max(BOX_COUNTS),
-    distinct_images_only: bool = True,
-) -> dict[int, tuple[ReferenceBox, ...]]:
-    """Select nested, diverse, train-only reference boxes.
-
-    Rank one matches the existing experiment's largest-relative-area rule.
-    Remaining ranks use deterministic farthest-point sampling over object-crop
-    pixels. By default, each box comes from a distinct image; instance-based
-    FSOD datasets can explicitly allow shared source images. The ordering never
-    uses test images or model predictions.
-    """
-
-    images = {int(image["id"]): image for image in train["images"]}
-    categories = base.categories_by_id(train)
-    annotations_by_category: dict[int, list[dict[str, Any]]] = {
-        category_id: [] for category_id in categories
-    }
-    for annotation in train["annotations"]:
-        category_id = int(annotation["category_id"])
-        if category_id in annotations_by_category:
-            annotations_by_category[category_id].append(annotation)
-
-    sequences: dict[int, tuple[ReferenceBox, ...]] = {}
-    for category_id, category_name in categories.items():
-        # Prefer one representative box per image when the dataset supports
-        # it. RF20's K-shot definition is instance based, so datasets with
-        # fewer than K distinct source images can explicitly opt into using
-        # all distinct annotated boxes, including multiple boxes from one
-        # source image.
-        if distinct_images_only:
-            best_by_image: dict[int, dict[str, Any]] = {}
-            for annotation in annotations_by_category[category_id]:
-                image_id = int(annotation["image_id"])
-                area = float(annotation["bbox"][2]) * float(annotation["bbox"][3])
-                current = best_by_image.get(image_id)
-                if current is None:
-                    best_by_image[image_id] = annotation
-                    continue
-                current_area = float(current["bbox"][2]) * float(current["bbox"][3])
-                if (area, -int(annotation["id"])) > (
-                    current_area,
-                    -int(current["id"]),
-                ):
-                    best_by_image[image_id] = annotation
-            selected_annotations = list(best_by_image.values())
-        else:
-            selected_annotations = list(annotations_by_category[category_id])
-        if len(selected_annotations) < required_count:
-            raise ValueError(
-                f"{category_name!r} has {len(selected_annotations)} eligible "
-                f"positive train boxes; {required_count} are required."
-            )
-
-        candidates: list[dict[str, Any]] = []
-        for annotation in selected_annotations:
-            image_id = int(annotation["image_id"])
-            image = images[image_id]
-            image_path = train_directory / str(image["file_name"])
-            if not image_path.is_file():
-                raise FileNotFoundError(image_path)
-            relative_area = (
-                float(annotation["bbox"][2])
-                * float(annotation["bbox"][3])
-                / (int(image["width"]) * int(image["height"]))
-            )
-            candidates.append(
-                {
-                    "annotation": annotation,
-                    "image": image,
-                    "relative_area": relative_area,
-                    "feature": _crop_feature(image_path, annotation["bbox"]),
-                }
-            )
-
-        candidates.sort(
-            key=lambda item: (
-                -item["relative_area"],
-                str(item["image"]["file_name"]),
-                int(item["annotation"]["id"]),
-            )
-        )
-        selected = [candidates.pop(0)]
-        while len(selected) < required_count:
-            candidates.sort(
-                key=lambda item: (
-                    -min(
-                        _squared_distance(item["feature"], chosen["feature"])
-                        for chosen in selected
-                    ),
-                    str(item["image"]["file_name"]),
-                    int(item["annotation"]["id"]),
-                )
-            )
-            selected.append(candidates.pop(0))
-
-        references = []
-        for rank, item in enumerate(selected, start=1):
-            annotation = item["annotation"]
-            image = item["image"]
-            references.append(
-                ReferenceBox(
-                    category_id=category_id,
-                    category_name=category_name,
-                    rank=rank,
-                    annotation_id=int(annotation["id"]),
-                    image_id=int(image["id"]),
-                    file_name=str(image["file_name"]),
-                    width=int(image["width"]),
-                    height=int(image["height"]),
-                    bbox_xyxy_1000=base.annotation_xywh_to_normalized_xyxy(
-                        annotation["bbox"],
-                        int(image["width"]),
-                        int(image["height"]),
-                    ),
-                )
-            )
-        sequences[category_id] = tuple(references)
-    return sequences
-
-
-def prepare_reference_assets(
-    train_directory: Path,
-    output_directory: Path,
-    references: dict[int, tuple[ReferenceBox, ...]],
-) -> dict[tuple[int, int], dict[str, Path]]:
-    assets: dict[tuple[int, int], dict[str, Path]] = {}
-    for category_id, sequence in references.items():
-        for reference in sequence:
-            source = train_directory / reference.file_name
-            drawn = (
-                output_directory
-                / f"class_{category_id}"
-                / f"rank_{reference.rank:02d}.jpg"
-            )
-            base.render_reference(
-                source,
-                [reference.bbox_xyxy_1000],
-                drawn,
-                positive=True,
-            )
-            assets[(category_id, reference.rank)] = {
-                "source": source,
-                "drawn": drawn,
-            }
-    return assets
+def minimal_output_protocol() -> str:
+    # Deliberately contains no class name, visual-concept description, or
+    # find/detect/same-kind instruction. It exists only to make coordinates
+    # machine-scorable and declares the last image as the coordinate frame.
+    return (
+        'OUTPUT(last image): [{"bbox_2d":[x1,y1,x2,y2]}] | []; '
+        "XYXY integers normalized 0..1000."
+    )
 
 
 def build_tasks(
@@ -267,24 +95,18 @@ def build_tasks(
     tasks: list[base.Task] = []
     for condition in CONDITIONS:
         for image in sorted(test["images"], key=lambda value: int(value["id"])):
-            common = {
-                "mode": condition.mode,
-                "image_id": int(image["id"]),
-                "file_name": str(image["file_name"]),
-                "width": int(image["width"]),
-                "height": int(image["height"]),
-            }
-            if condition.single_class:
-                for category_id, category_name in categories.items():
-                    tasks.append(
-                        base.Task(
-                            **common,
-                            category_id=category_id,
-                            category_name=category_name,
-                        )
+            for category_id, category_name in categories.items():
+                tasks.append(
+                    base.Task(
+                        mode=condition.mode,
+                        image_id=int(image["id"]),
+                        file_name=str(image["file_name"]),
+                        width=int(image["width"]),
+                        height=int(image["height"]),
+                        category_id=category_id,
+                        category_name=category_name,
                     )
-            else:
-                tasks.append(base.Task(**common))
+                )
     if len({task.key for task in tasks}) != len(tasks):
         raise ValueError("Generated task keys are not unique.")
     return tasks
@@ -293,87 +115,79 @@ def build_tasks(
 def build_messages(
     task: base.Task,
     test_directory: Path,
-    categories: dict[int, str],
-    references: dict[int, tuple[ReferenceBox, ...]],
+    references: dict[int, tuple[box_ablation.ReferenceBox, ...]],
     assets: dict[tuple[int, int], dict[str, Path]],
 ) -> list[dict[str, Any]]:
+    if task.category_id is None:
+        raise ValueError("Exemplar-only evaluation requires single-class tasks.")
     condition = CONDITIONS_BY_MODE[task.mode]
     target = test_directory / task.file_name
     if not target.is_file():
         raise FileNotFoundError(target)
 
-    if condition.single_class:
-        if task.category_id is None or task.category_name is None:
-            raise ValueError(f"Single-class task is missing its category: {task}")
-        requested = {task.category_id: task.category_name}
-        prompt = f'Detect every instance of "{task.category_name}" in the TARGET IMAGE. '
-    else:
-        requested = categories
-        prompt = "Detect every instance of the listed classes in the TARGET IMAGE. "
-
-    if condition.box_count:
-        prompt += (
-            f"Use the {condition.box_count} positive train-only reference "
-            f"box{'es' if condition.box_count != 1 else ''} supplied per class. "
+    content: list[dict[str, Any]] = []
+    if condition.instruction == "explicit":
+        content.append(
+            {
+                "type": "text",
+                "text": f"{EXPLICIT_PROMPT} {generic_output_contract()}",
+            }
         )
-    prompt += base.output_contract(list(requested.values()))
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
 
-    for category_id, category_name in requested.items():
-        for reference in references[category_id][: condition.box_count]:
-            label = (
-                f'POSITIVE REFERENCE FOR "{category_name}" '
-                f"({reference.rank}/{condition.box_count})"
-            )
-            if condition.representation == "numeric":
-                text = (
-                    f"{label}: normalized XYXY box "
-                    f"{json.dumps(list(reference.bbox_xyxy_1000))} marks one "
-                    f"positive example of {category_name}."
-                )
-                image_path = assets[(category_id, reference.rank)]["source"]
-            elif condition.representation == "drawn":
-                text = f"{label}: the green box marks one positive example of {category_name}."
-                image_path = assets[(category_id, reference.rank)]["drawn"]
-            else:
-                raise ValueError(f"Unknown representation: {condition.representation}")
+    for reference in references[task.category_id][: condition.box_count]:
+        if condition.representation == "numeric":
+            payload = {
+                "bbox_2d": list(reference.bbox_xyxy_1000),
+            }
             content.extend(
                 [
-                    {"type": "text", "text": text},
                     {
                         "type": "image_url",
-                        "image_url": {"url": base.data_url(image_path)},
+                        "image_url": {
+                            "url": base.data_url(
+                                assets[(task.category_id, reference.rank)]["source"]
+                            )
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": json.dumps(payload, separators=(",", ":")),
                     },
                 ]
             )
-    content.extend(
-        [
-            {"type": "text", "text": "TARGET IMAGE:"},
-            {"type": "image_url", "image_url": {"url": base.data_url(target)}},
-        ]
+        elif condition.representation == "drawn":
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": base.data_url(
+                            assets[(task.category_id, reference.rank)]["drawn"]
+                        )
+                    },
+                }
+            )
+        else:
+            raise ValueError(f"Unknown representation: {condition.representation}")
+
+    if condition.instruction == "explicit":
+        content.append({"type": "text", "text": "TARGET IMAGE:"})
+    content.append(
+        {"type": "image_url", "image_url": {"url": base.data_url(target)}}
     )
+    if condition.instruction == "minimal":
+        content.append({"type": "text", "text": minimal_output_protocol()})
     return [{"role": "user", "content": content}]
 
 
-def expected_images_per_request(condition: Condition, class_count: int) -> int:
-    reference_classes = 1 if condition.single_class else class_count
-    return 1 + condition.box_count * reference_classes
-
-
-def build_token_estimates(class_count: int) -> dict[str, int]:
-    """Build conservative per-mode totals used by the shared TPM limiter."""
-
+def build_token_estimates() -> dict[str, int]:
     return {
-        condition.mode: 3_000 * expected_images_per_request(condition, class_count)
-        + 2_500
+        condition.mode: 3_000 * (condition.box_count + 1) + 2_500
         for condition in CONDITIONS
     }
 
 
 class TaskRateLimiter:
-    """Apply one task's visual-input estimate to the shared dual limiter."""
-
-    def __init__(self, shared: base.SmoothDualRateLimiter, estimated_tokens: int) -> None:
+    def __init__(self, shared: base.SmoothDualRateLimiter, estimated_tokens: int):
         self.shared = shared
         self.estimated_tokens = estimated_tokens
 
@@ -405,29 +219,6 @@ def summarize_records(
     return {"updated_at": base.utc_now(), "total": total, "modes": result}
 
 
-def _usage_summary(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    usage = [record.get("usage") or {} for record in records]
-    inference_times = [
-        float(record["inference_seconds"])
-        for record in records
-        if record.get("inference_seconds") is not None
-    ]
-    return {
-        "prompt_tokens": sum(int(item.get("prompt_tokens") or 0) for item in usage),
-        "completion_tokens": sum(
-            int(item.get("completion_tokens") or 0) for item in usage
-        ),
-        "reasoning_tokens": sum(
-            int(
-                (item.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                or 0
-            )
-            for item in usage
-        ),
-        "mean_inference_seconds": fmean(inference_times) if inference_times else None,
-    }
-
-
 def finalize(
     all_tasks: Sequence[base.Task],
     annotation_path: Path,
@@ -441,8 +232,8 @@ def finalize(
     for condition in CONDITIONS:
         tasks = [task for task in all_tasks if task.mode == condition.mode]
         predictions: list[dict[str, Any]] = []
-        statuses: dict[str, int] = {}
         records: list[dict[str, Any]] = []
+        statuses: dict[str, int] = {}
         for task in tasks:
             record = base.load_record(record_path(output_directory, task))
             status = record.get("status", "missing") if record else "missing"
@@ -453,21 +244,19 @@ def finalize(
         complete = sum(statuses.get(status, 0) for status in TERMINAL_STATUSES) == len(
             tasks
         )
-        predictions_path = output_directory / "predictions" / f"{condition.mode}.json"
-        base.atomic_write_json(predictions_path, predictions)
+        base.atomic_write_json(
+            output_directory / "predictions" / f"{condition.mode}.json",
+            predictions,
+        )
         metrics = base.score_coco(annotation_path, predictions) if complete else None
         summary = {
             "condition": asdict(condition),
             "complete": complete,
             "task_count": len(tasks),
-            "calls_per_image": class_count if condition.single_class else 1,
-            "reference_images_per_request": expected_images_per_request(
-                condition, class_count
-            )
-            - 1,
+            "calls_per_image": class_count,
             "statuses": statuses,
             "prediction_count": len(predictions),
-            "usage": _usage_summary(records),
+            "usage": box_ablation._usage_summary(records),
             "metrics": metrics,
         }
         modes[condition.mode] = summary
@@ -477,22 +266,17 @@ def finalize(
         rows.append(
             {
                 "mode": condition.mode,
-                "formulation": condition.formulation,
-                "representation": condition.representation or "class_names",
+                "instruction": condition.instruction,
+                "representation": condition.representation,
                 "boxes_per_class": condition.box_count,
-                "calls_per_image": summary["calls_per_image"],
-                "reference_images_per_request": summary[
-                    "reference_images_per_request"
-                ],
+                "calls_per_image": class_count,
                 "task_count": len(tasks),
                 "complete": complete,
                 "mAP50_95": metrics["AP"] * 100 if metrics else None,
                 "mAP50": metrics["AP50"] * 100 if metrics else None,
                 "model_failures": statuses.get("model_failure", 0),
                 "errors": statuses.get("error", 0) + statuses.get("missing", 0),
-                "mean_inference_seconds": summary["usage"][
-                    "mean_inference_seconds"
-                ],
+                "mean_inference_seconds": summary["usage"]["mean_inference_seconds"],
                 "prompt_tokens": summary["usage"]["prompt_tokens"],
                 "completion_tokens": summary["usage"]["completion_tokens"],
             }
@@ -505,8 +289,10 @@ def finalize(
         "modes": modes,
     }
     base.atomic_write_json(output_directory / "aggregate_metrics.json", aggregate)
-    comparison = {"updated_at": base.utc_now(), "rows": rows}
-    base.atomic_write_json(output_directory / "comparison_summary.json", comparison)
+    base.atomic_write_json(
+        output_directory / "comparison_summary.json",
+        {"updated_at": base.utc_now(), "rows": rows},
+    )
     csv_path = output_directory / "comparison_summary.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = csv_path.with_suffix(".csv.tmp")
@@ -534,19 +320,20 @@ def finalize(
 def write_or_validate_manifest(
     path: Path,
     configuration: dict[str, Any],
-    references: dict[int, tuple[ReferenceBox, ...]],
+    references: dict[int, tuple[box_ablation.ReferenceBox, ...]],
     train_directory: Path,
-    *,
-    distinct_images_only: bool,
 ) -> None:
     expected = {
         "prompt_version": PROMPT_VERSION,
         "configuration": configuration,
         "conditions": [asdict(condition) for condition in CONDITIONS],
+        "class_names_exposed_to_model": False,
+        "minimal_mode_semantic_instruction": False,
+        "explicit_prompt": EXPLICIT_PROMPT,
         "reference_selection": {
             "method": "largest-relative-area-then-greedy-crop-diversity-v1",
             "nested_counts": list(BOX_COUNTS),
-            "one_box_per_distinct_train_image": distinct_images_only,
+            "one_box_per_distinct_train_image": True,
             "classes": {
                 str(category_id): [
                     {
@@ -555,7 +342,7 @@ def write_or_validate_manifest(
                             train_directory / reference.file_name
                         ),
                     }
-                    for reference in sequence
+                    for reference in sequence[: max(BOX_COUNTS)]
                 ]
                 for category_id, sequence in references.items()
             },
@@ -564,11 +351,8 @@ def write_or_validate_manifest(
     expected = json.loads(json.dumps(expected, ensure_ascii=False))
     existing = base.load_record(path)
     if existing:
-        comparable = {key: existing.get(key) for key in expected}
-        if comparable != expected:
-            raise ValueError(
-                f"Existing manifest does not match this experiment: {path}"
-            )
+        if {key: existing.get(key) for key in expected} != expected:
+            raise ValueError(f"Existing manifest does not match this experiment: {path}")
         return
     base.atomic_write_json(path, {**expected, "created_at": base.utc_now()})
 
@@ -606,14 +390,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--image-ids", nargs="+", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--limit-per-mode", type=int)
-    parser.add_argument(
-        "--allow-shared-reference-images",
-        action="store_true",
-        help=(
-            "Use distinct train annotations when fewer than ten distinct source "
-            "images exist for a class."
-        ),
-    )
     parser.add_argument("--prepare-only", action="store_true")
     return parser.parse_args(argv)
 
@@ -636,7 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
-        raise RuntimeError(f"Another ablation process owns {output_directory}.") from error
+        raise RuntimeError(f"Another process owns {output_directory}.") from error
 
     train_directory = dataset_directory / "train"
     test_directory = dataset_directory / "test"
@@ -648,16 +424,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     categories = base.categories_by_id(test)
     if categories != base.categories_by_id(train):
         raise ValueError("Train/test category definitions differ.")
-    distinct_images_only = not args.allow_shared_reference_images
-    references = select_reference_sequences(
+    references = box_ablation.select_reference_sequences(
         train,
         train_directory,
-        distinct_images_only=distinct_images_only,
+        required_count=max(BOX_COUNTS),
     )
-    assets = prepare_reference_assets(
+    assets = box_ablation.prepare_reference_assets(
         train_directory, output_directory / "references", references
     )
-    token_estimates = build_token_estimates(len(categories))
+    token_estimates = build_token_estimates()
     all_tasks = build_tasks(test, categories)
     selected_modes = set(args.modes)
     tasks = [task for task in all_tasks if task.mode in selected_modes]
@@ -676,6 +451,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "reasoning_effort": "none",
         "vl_high_resolution_images": False,
         "timeout_seconds": args.timeout_seconds,
+        "force_single_category_labels": True,
     }
     configuration = {
         "dataset_directory": str(dataset_directory),
@@ -691,14 +467,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         configuration,
         references,
         train_directory,
-        distinct_images_only=distinct_images_only,
     )
     base.atomic_write_json(
         output_directory / "progress.json",
         summarize_records(all_tasks, output_directory),
     )
     LOGGER.info(
-        "Prepared %d requests across %d conditions, %d images, and %d classes.",
+        "Prepared %d requests across %d conditions, %d images, and %d hidden classes.",
         len(all_tasks),
         len(CONDITIONS),
         len(test["images"]),
@@ -726,9 +501,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for task in tasks:
         existing = base.load_record(record_path(output_directory, task))
         if existing and existing.get("status") in TERMINAL_STATUSES:
-            messages = build_messages(
-                task, test_directory, categories, references, assets
-            )
+            messages = build_messages(task, test_directory, references, assets)
             expected = base.request_fingerprint(
                 task, base.request_summary(messages), settings
             )
@@ -765,7 +538,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     def execute(task: base.Task) -> dict[str, Any]:
-        messages = build_messages(task, test_directory, categories, references, assets)
+        messages = build_messages(task, test_directory, references, assets)
         return base.execute_task(
             task,
             client,
@@ -778,6 +551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.max_retries,
             TaskRateLimiter(rate_limiter, token_estimates[task.mode]),
             messages_override=messages,
+            force_single_category_labels=True,
         )
 
     write_lock = threading.Lock()
@@ -823,10 +597,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         class_count=len(categories),
     )
     selected_progress = summarize_records(tasks, output_directory)
-    unresolved = (
-        selected_progress["total"]["error"]
-        + selected_progress["total"]["pending"]
-    )
+    unresolved = selected_progress["total"]["error"] + selected_progress["total"][
+        "pending"
+    ]
     LOGGER.info(
         "Invocation finished: selected terminal=%d/%d, unresolved=%d.",
         selected_progress["total"]["success"]
