@@ -99,3 +99,17 @@ def test_twenty_image_subset_is_nested_representative_and_reuses_five(tmp_path):
     for effort in subset.REASONING_EFFORTS:
         for mode in subset.NEW_MODES:
             assert len(list((output / effort / "records" / mode).glob("*.json"))) == 5
+
+
+def test_full_run_uses_every_test_image_and_can_select_one_new_mode():
+    _, test, _, _, _ = load_fixture()
+    image_ids = subset.image_ids_for_run(test, "full")
+    assert len(image_ids) == 59
+    assert image_ids == tuple(sorted(image["id"] for image in test["images"]))
+    tasks = subset.build_tasks(
+        test,
+        image_ids,
+        ["multi_class_positive_numeric"],
+    )
+    assert len(tasks) == 59
+    assert {task.mode for task in tasks} == {"multi_class_positive_numeric"}

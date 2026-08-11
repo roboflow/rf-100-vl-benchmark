@@ -42,3 +42,23 @@ To make one paid smoke-test request in every mode before the full run, add
 `--limit-per-mode 1`. Those six checkpoints are reused by the full command.
 `--image-ids` and `--category-ids` can target known-positive smoke cases without
 changing the full run manifest.
+
+## Full selected-strategy comparison
+
+The completed full runs above already contain the class-name and per-class
+reference strategies. To add the one-call positive numeric reference strategy
+for all 59 test images under both reasoning conditions, while fingerprint-
+reusing the completed 20-image records, run:
+
+```bash
+uv run --with-requirements requirements-cosmos.txt \
+  python evaluate_qwen38_orion_subset.py \
+  --subset full \
+  --new-modes multi_class_positive_numeric \
+  --reasoning-efforts none low \
+  --output-dir qwen38-orion-runs/orion-full-selected-prompts-v1
+```
+
+The output comparison combines the completed original full-test predictions
+with the new one-call strategy. Rerunning this command resumes only missing or
+non-terminal requests.
