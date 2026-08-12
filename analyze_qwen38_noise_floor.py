@@ -20,6 +20,73 @@ def canonical_sha(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def canonical_predictions(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make semantically identical detection lists insensitive to output order."""
+    return sorted(
+        predictions,
+        key=lambda value: (
+            int(value["category_id"]),
+            *(float(coordinate) for coordinate in value["bbox"]),
+            float(value.get("score", 1.0)),
+        ),
+    )
+
+
+def xywh_iou(left: list[float], right: list[float]) -> float:
+    left_x1, left_y1, left_width, left_height = map(float, left)
+    right_x1, right_y1, right_width, right_height = map(float, right)
+    left_x2, left_y2 = left_x1 + left_width, left_y1 + left_height
+    right_x2, right_y2 = right_x1 + right_width, right_y1 + right_height
+    intersection_width = max(0.0, min(left_x2, right_x2) - max(left_x1, right_x1))
+    intersection_height = max(0.0, min(left_y2, right_y2) - max(left_y1, right_y1))
+    intersection = intersection_width * intersection_height
+    union = left_width * left_height + right_width * right_height - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def pairwise_detection_agreement(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    iou_threshold: float = 0.5,
+) -> dict[str, Any]:
+    """Compare two unordered detection sets using same-class greedy IoU matching."""
+    candidates = []
+    for left_index, left_detection in enumerate(left):
+        for right_index, right_detection in enumerate(right):
+            if int(left_detection["category_id"]) != int(right_detection["category_id"]):
+                continue
+            iou = xywh_iou(left_detection["bbox"], right_detection["bbox"])
+            if iou >= iou_threshold:
+                candidates.append((iou, left_index, right_index))
+    matched_left: set[int] = set()
+    matched_right: set[int] = set()
+    matched_ious = []
+    for iou, left_index, right_index in sorted(candidates, reverse=True):
+        if left_index in matched_left or right_index in matched_right:
+            continue
+        matched_left.add(left_index)
+        matched_right.add(right_index)
+        matched_ious.append(iou)
+    match_count = len(matched_ious)
+    denominator = len(left) + len(right)
+    f1 = 1.0 if denominator == 0 else 2.0 * match_count / denominator
+    return {
+        "left_count": len(left),
+        "right_count": len(right),
+        "matched_count": match_count,
+        "f1": f1,
+        "matched_ious": matched_ious,
+    }
+
+
+def category_count_signature(predictions: list[dict[str, Any]]) -> tuple[tuple[int, int], ...]:
+    counts: dict[int, int] = {}
+    for prediction in predictions:
+        category_id = int(prediction["category_id"])
+        counts[category_id] = counts.get(category_id, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
 def metric_summary(values: list[float]) -> dict[str, Any]:
     if len(values) < 3:
         raise ValueError("At least three identical repeats are required.")
@@ -81,15 +148,32 @@ def analyze_run(name: str, run_directory: Path) -> dict[str, Any]:
     image_ids = list(next(iter(image_sets)))
     raw_all_equal = 0
     predictions_all_equal = 0
+    detection_counts_all_equal = 0
+    category_counts_all_equal = 0
+    pairwise_f1 = []
+    matched_ious = []
     for image_id in image_ids:
         raw_hashes = {
             canonical_sha(records[mode][image_id].get("raw_response")) for mode in modes
         }
+        predictions = {
+            mode: records[mode][image_id].get("predictions", []) for mode in modes
+        }
         prediction_hashes = {
-            canonical_sha(records[mode][image_id].get("predictions", [])) for mode in modes
+            canonical_sha(canonical_predictions(predictions[mode])) for mode in modes
         }
         raw_all_equal += len(raw_hashes) == 1
         predictions_all_equal += len(prediction_hashes) == 1
+        detection_counts_all_equal += len({len(value) for value in predictions.values()}) == 1
+        category_counts_all_equal += len(
+            {category_count_signature(value) for value in predictions.values()}
+        ) == 1
+        for left_mode, right_mode in combinations(modes, 2):
+            agreement = pairwise_detection_agreement(
+                predictions[left_mode], predictions[right_mode]
+            )
+            pairwise_f1.append(float(agreement["f1"]))
+            matched_ious.extend(float(value) for value in agreement["matched_ious"])
 
     metrics = {
         "AP": metric_summary([float(row["mAP50_95"]) for row in rows]),
@@ -109,9 +193,19 @@ def analyze_run(name: str, run_directory: Path) -> dict[str, Any]:
         "response_repeatability": {
             "images_with_identical_raw_response_across_all_repeats": raw_all_equal,
             "images_with_identical_predictions_across_all_repeats": predictions_all_equal,
+            "images_with_identical_detection_count_across_all_repeats": detection_counts_all_equal,
+            "images_with_identical_per_class_counts_across_all_repeats": category_counts_all_equal,
             "total_images": len(image_ids),
             "raw_identity_rate": raw_all_equal / len(image_ids),
             "prediction_identity_rate": predictions_all_equal / len(image_ids),
+            "detection_count_identity_rate": detection_counts_all_equal / len(image_ids),
+            "per_class_count_identity_rate": category_counts_all_equal / len(image_ids),
+            "pairwise_image_repeat_comparisons": len(pairwise_f1),
+            "mean_pairwise_detection_f1_at_iou_50": fmean(pairwise_f1),
+            "mean_iou_of_same_class_matches_at_iou_50": (
+                fmean(matched_ious) if matched_ious else None
+            ),
+            "same_class_matches_at_iou_50": len(matched_ious),
         },
         "rows": rows,
     }
