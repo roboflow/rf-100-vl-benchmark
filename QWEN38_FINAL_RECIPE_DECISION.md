@@ -194,21 +194,28 @@ that every individual dataset prefers box prompting.
 | Self-generated names | Reject when real names exist | Matched causal screen |
 | Sampling controls | Temperature 0, seed 1234; still stochastic | Ten full repeats/dataset |
 
-## Limits and smallest useful follow-up
+## Limits and most useful follow-up
 
 The result does not prove that multi-class or two examples are optimal for
 every RF20/RF100 dataset, nor that the measured names-only noise floor is
 identical for every prompt family.
 
-The smallest useful external validation is one new, preselected dataset with
-only three locked arms:
+The next major step is a locked comparison on several more preselected
+RF100-VL datasets. The genuinely unsettled choices are one versus two examples
+and multi-class versus single-class inference. The compact comparison is:
 
 1. names only, multi-class;
-2. names + numeric boxes x2, multi-class; and
-3. names + numeric boxes x2, single-class merged.
+2. names + numeric boxes x1, multi-class;
+3. names + numeric boxes x2, multi-class;
+4. names + numeric boxes x1, single-class merged;
+5. names + numeric boxes x2, single-class merged; and
+6. names + drawn boxes x2, multi-class, as a modality control.
 
-There is no current reason to reopen reasoning, self-naming, anonymous,
-negative-example, drawn-box, or high-box-count branches.
+These arms retain the cost baseline and resolve the comparisons that were
+close or changed direction by dataset. The drawn-box control is included
+because it tied numeric boxes within noise on Dreidel but lost clearly on
+Orion. There is no current reason to reopen reasoning, self-naming, anonymous,
+negative-example, or high-box-count branches.
 
 ## Sources
 
