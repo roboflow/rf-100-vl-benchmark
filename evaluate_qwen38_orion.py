@@ -631,6 +631,10 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
     sampling_parameters = {}
     if settings.get("temperature") is not None:
         sampling_parameters["temperature"] = settings["temperature"]
+    reasoning_effort = settings["reasoning_effort"]
+    enable_thinking = settings.get(
+        "enable_thinking", reasoning_effort != "none"
+    )
     stream = client.chat.completions.create(
         model=settings["model"],
         messages=messages,
@@ -640,7 +644,11 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
         max_completion_tokens=settings["max_completion_tokens"],
         **sampling_parameters,
         extra_body={
-            "reasoning_effort": settings["reasoning_effort"],
+            # Keep the established explicit effort while also using
+            # DashScope's documented hybrid-model switch. This makes the
+            # non-thinking condition unambiguous on qwen3.8-max.
+            "reasoning_effort": reasoning_effort,
+            "enable_thinking": enable_thinking,
             "vl_high_resolution_images": settings["vl_high_resolution_images"],
         },
         # DashScope queues traffic-burst throttles for up to 30 seconds instead
@@ -1050,6 +1058,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "seed": args.seed,
         "max_completion_tokens": args.max_completion_tokens,
         "reasoning_effort": args.reasoning_effort,
+        "enable_thinking": args.reasoning_effort != "none",
         "vl_high_resolution_images": False,
         "timeout_seconds": args.timeout_seconds,
     }

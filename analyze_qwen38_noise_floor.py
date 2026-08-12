@@ -100,6 +100,8 @@ def analyze_run(name: str, run_directory: Path) -> dict[str, Any]:
         "run_directory": str(run_directory.resolve()),
         "repeat_count": len(rows),
         "image_count": len(image_ids),
+        "concurrency": manifest.get("concurrency"),
+        "thinking_controls": manifest.get("thinking_controls"),
         "temperature": 0.0,
         "seed": rows[0]["seed"],
         "reasoning_effort": rows[0]["reasoning_effort"],

@@ -168,9 +168,21 @@ def test_stream_request_sends_temperature_only_when_configured():
     messages = [{"role": "user", "content": "test"}]
     qwen.stream_inference(client, messages, settings)
     assert "temperature" not in client.chat.completions.calls[0]
+    assert client.chat.completions.calls[0]["extra_body"] == {
+        "reasoning_effort": "none",
+        "enable_thinking": False,
+        "vl_high_resolution_images": False,
+    }
 
     qwen.stream_inference(client, messages, {**settings, "temperature": 0.0})
     assert client.chat.completions.calls[1]["temperature"] == 0.0
+
+    qwen.stream_inference(
+        client,
+        messages,
+        {**settings, "reasoning_effort": "low"},
+    )
+    assert client.chat.completions.calls[2]["extra_body"]["enable_thinking"] is True
 
 
 def test_streaming_generation_has_a_total_wall_clock_deadline(monkeypatch):

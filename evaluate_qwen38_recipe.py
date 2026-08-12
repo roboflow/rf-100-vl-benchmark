@@ -324,6 +324,7 @@ def condition_settings(condition: Condition, common: dict[str, Any]) -> dict[str
         **common,
         "seed": condition.seed,
         "reasoning_effort": condition.reasoning_effort,
+        "enable_thinking": condition.reasoning_effort != "none",
         "force_single_category_labels": condition.single_class,
     }
 
@@ -646,6 +647,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "method": "largest-relative-area-then-greedy-crop-diversity-v1",
             "one_box_per_distinct_train_image": not args.allow_shared_reference_images,
             "classes": reference_manifest,
+        },
+        "concurrency": args.concurrency,
+        "thinking_controls": {
+            "policy": "reasoning_effort-plus-enable_thinking-v1",
+            "none_maps_to_enable_thinking": False,
         },
         "requests_per_minute": args.requests_per_minute,
         "tokens_per_minute": args.tokens_per_minute,

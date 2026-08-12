@@ -166,6 +166,11 @@ def test_prepare_only_subset_has_locked_deterministic_contract(tmp_path, dataset
     progress = json.loads((output / "progress.json").read_text())
     ground_truth = json.loads((output / "ground_truth_subset.json").read_text())
     assert manifest["common_settings"]["temperature"] == 0.0
+    assert manifest["concurrency"] == 256
+    assert manifest["thinking_controls"] == {
+        "policy": "reasoning_effort-plus-enable_thinking-v1",
+        "none_maps_to_enable_thinking": False,
+    }
     assert manifest["max_detections"] == 500
     assert manifest["selected_test_image_ids"] == sorted(image_ids)
     assert len(ground_truth["images"]) == 2
@@ -173,6 +178,21 @@ def test_prepare_only_subset_has_locked_deterministic_contract(tmp_path, dataset
     assert progress["total"]["total"] == 2 * (1 + len(categories))
     assert progress["total"]["pending"] == progress["total"]["total"]
     assert not (output / "_SUCCESS.json").exists()
+
+
+def test_condition_settings_explicitly_disable_both_thinking_paths():
+    condition = recipe.Condition(
+        mode="names_multi",
+        formulation="multi",
+        semantics="class_names",
+        representation="none",
+        box_count=0,
+        reasoning_effort="none",
+        seed=1234,
+    )
+    settings = recipe.condition_settings(condition, {"temperature": 0.0})
+    assert settings["reasoning_effort"] == "none"
+    assert settings["enable_thinking"] is False
 
 
 @pytest.mark.parametrize(
