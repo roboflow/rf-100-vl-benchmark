@@ -1,7 +1,7 @@
 # Qwen3.8-Max RF100-VL/FSOD research log
 
-Canonical status: active, append-only research record  
-Last evidence snapshot: 2026-08-12 00:29 UTC  
+Canonical status: completed, append-only research record
+Last evidence snapshot: 2026-08-12 09:00 UTC
 Model/API: `qwen3.8-max` through DashScope International's OpenAI-compatible endpoint
 
 This document is the source of truth for the Qwen3.8-Max object-detection and
@@ -12,6 +12,10 @@ methodology corrections, active experiments, and predeclared decision rules.
 Machine-readable run artifacts remain authoritative for exact values. When
 this document and an artifact disagree, verify the artifact, correct this log,
 and record the correction in the change log.
+
+The final step-by-step selection rationale, including every evaluated decision
+axis and the limits of the conclusion, is in
+`QWEN38_FINAL_RECIPE_DECISION.md`.
 
 ## How to interpret this log
 
@@ -66,35 +70,32 @@ Dataset shapes used so far:
 
 ## Current evidence summary
 
-Strong screening patterns:
+The adaptive study completed at 2026-08-12 09:00 UTC. Its selected shared
+accuracy recipe is one multi-class request per target, real class names, two
+positive numeric-box train references per class, and no reasoning. The locked
+Dreidel/Orion macro is **35.00 / 58.58**.
 
-1. Cross-image box references improve accuracy substantially on both complete
-   Dreidel and Orion box-count screens.
-2. The best count is not monotonic: additional references can help, plateau, or
-   hurt depending on dataset, formulation, encoding, and semantic instruction.
-3. Formulation is dataset-dependent. Matched provider-default screens favor
-   multi-class on Dreidel by roughly 18–23 mAP, but single-class on Orion by
-   roughly 9–11 mAP. This reversal is provisional until locked temperature-zero
-   matched comparisons exceed both measured noise floors.
-4. Numeric versus drawn is an interaction, not a universal ranking. The two
-   encodings are nearly tied for Dreidel multi-class at two boxes; drawn is much
-   stronger for Dreidel single-class at five boxes, while Orion usually peaks
-   with one or two examples.
-5. Low reasoning is slower and more expensive and does not provide a stable
-   accuracy benefit. It remains subject to one small locked stopping-rule test.
-6. Anonymous exemplar-only prompting works without exposing class names.
-   Explicit instruction is stronger than a minimal output-only protocol, and
-   drawn exemplars with five boxes are currently the strongest anonymous
-   Dreidel screening condition.
+Final conclusions:
 
-Not yet established:
-
-- Residual API score noise at fixed temperature and seed.
-- A final temperature-zero single-versus-multi winner on each dataset.
-- Whether model-generated visual names help after controlling for the same
-  boxes.
-- The best anonymous multi-class `Concept A/B/...` recipe.
-- A final two-dataset accuracy-first and throughput-first recipe.
+1. Positive box references provide a material shared accuracy gain, but the
+   optimal count is not monotonic. Two is the selected noise-aware efficiency
+   point.
+2. Numeric and drawn references tie on Dreidel in the locked comparison;
+   numeric is materially stronger on Orion and is selected.
+3. Multi- versus single-class formulation is dataset-dependent. Dreidel
+   strongly favors multi-class while Orion's complete screen favors
+   single-class. Multi-class is the shared macro/efficiency choice, not a
+   universal per-dataset winner.
+4. Low reasoning failed the locked two-dataset gate, more than doubled latency,
+   and was not advanced to medium.
+5. Explicit anonymous box transfer works, but loses heavily to real class
+   names. Minimal box-only prompts, self-generated names, and negative examples
+   do not justify inclusion in the final recipe.
+6. Residual output variance remains substantial at temperature zero and fixed
+   seed. The operational mAP tie thresholds are 3.31 on Dreidel and 4.92 on
+   Orion.
+7. Class names only remain the cost-first alternative: they use about one
+   tenth the tokens but score **30.99 / 45.63** on the locked macro.
 
 ## Chronological experiment record
 
@@ -423,8 +424,9 @@ What this newly revealed:
 
 ### 9. Anonymous seven/ten-box extension
 
-Status: **Active**  
+Status: **Completed screening**
 Started: 2026-08-12 00:06 UTC  
+Completed: 2026-08-12 01:35 UTC
 Artifact: `qwen38-fsod-runs/dreidel-exemplar-only-box-b07-b10-v1/`  
 Implementation commit: `45c0974`
 
@@ -436,15 +438,23 @@ combined with the completed 1/2/5 run into
 Like the 1/2/5 matrix, this extension uses seed 1234, reasoning none, and
 provider-default temperature.
 
-Snapshot at 2026-08-12 00:29 UTC: 660/2,592 successful, zero model failures,
-zero infrastructure errors. Explicit numeric seven and ten were complete;
-explicit drawn seven was 12/324.
+The extension completed and was combined with the 1/2/5 run. The important
+seven/ten-box results were:
 
-A read-only aggregation of all 324 completed explicit-numeric-seven records
-scored **25.15 / 35.69**, with zero failures and mean inference time 6.32
-seconds. It is the best explicit numeric anonymous score so far, but its
-1.1–1.3 mAP gain over two/five boxes may be entirely within residual noise.
-The official combined summary will replace this interim line after completion.
+| Instruction | Encoding | Boxes | Score |
+|---|---|---:|---:|
+| Explicit | Numeric | 7 | 25.15 / 35.69 |
+| Explicit | Numeric | 10 | 24.69 / 37.32 |
+| Explicit | Drawn | 7 | 35.68 / 56.98 |
+| Explicit | Drawn | 10 | 35.69 / 55.15 |
+| Minimal | Numeric | 7 | 23.27 / 32.91 |
+| Minimal | Numeric | 10 | 23.78 / 34.31 |
+| Minimal | Drawn | 7 | 24.48 / 40.00 |
+| Minimal | Drawn | 10 | 28.83 / 48.12 |
+
+Explicit drawn five remained the point-estimate leader at **36.82 / 58.08**.
+Five, seven, and ten were within the later Dreidel noise floor, so five was the
+more efficient anonymous single-class choice.
 
 ### 10. Explicit temperature-zero calibration
 
@@ -508,13 +518,13 @@ does not provide an accuracy score.
 
 ### 12. Noise-aware adaptive finalist study
 
-Status: **Queued behind the active extension**  
+Status: **Completed**
+Completed: 2026-08-12 09:00 UTC
 Implementation commits: `27cd344`, `1bffd8f`  
 Launcher: `run_qwen38_recipe_study.sh`  
-Persistent session: `qwen-recipe-study`
+Final rationale: `QWEN38_FINAL_RECIPE_DECISION.md`
 
-The remaining stages are predeclared and run sequentially to avoid API-quota
-contention:
+The stages were predeclared and ran sequentially to avoid API-quota contention:
 
 1. Finish and combine anonymous 7/10-box records.
 2. Run ten identical full-test multi-class-name repetitions on Dreidel and
@@ -534,6 +544,23 @@ contention:
 9. Automatically produce the two-dataset macro ranking, efficiency metrics,
    failure counts, paired-image bootstrap evidence for close candidates, and
    final accuracy-first and throughput-first selections.
+
+Every stage completed. Noise calibration produced mAP tie thresholds of 3.31
+for Dreidel and 4.92 for Orion. Low reasoning failed the two-dataset gate, so
+medium was not run. Self-generated names did not advance. The locked finalists
+were:
+
+| Finalist | Dreidel | Orion | Macro | Failures |
+|---|---:|---:|---:|---:|
+| Class names + numeric boxes x2 | **53.11 / 76.06** | 16.89 / **41.10** | **35.00 / 58.58** | 0 |
+| Class names + drawn boxes x2 | 51.53 / 74.30 | 10.75 / 33.07 | 31.14 / 53.69 | 0 |
+| Class names only | 43.22 / 57.50 | **18.77 / 33.76** | 30.99 / 45.63 | 0 |
+| Anonymous explicit + numeric boxes x2 | 36.47 / 60.68 | 2.56 / 8.54 | 19.51 / 34.61 | 21 |
+
+The selected accuracy recipe is class names plus two numeric references per
+class in one multi-class request, with no reasoning. Class names only are the
+cost-first alternative because they use 1,816 rather than 18,797 tokens per
+image.
 
 ## Locked decision rules for future conclusions
 
@@ -600,19 +627,19 @@ Report separate accuracy-first and throughput-first recipes when warranted.
 
 | Question | Current evidence | Next resolving experiment |
 |---|---|---|
-| Single vs multi-class | Strong provider-default reversal across Dreidel/Orion | Locked matched finalists on both datasets |
-| Reasoning level | Mostly hurts or costs >2x; one combined-mode exception | Small none/low gate; medium only if gate passes |
-| Number of examples | Non-monotonic; Dreidel multi peaks at 2, Orion at 1–2 | Complete anonymous 7/10 and locked shortlist |
-| Numeric vs drawn | Interaction with dataset/formulation | Noise-aware finalists on both datasets |
-| Explicit vs minimal anonymous | Explicit clearly stronger in Dreidel 1/2/5 | Complete 7/10 and anonymous multi-class grid |
-| Anonymous single vs multi | Single matrix partly complete | Full `Concept A/B/...` multi grid |
-| Self-generated names | Not yet measured | Name + boxes vs boxes-only vs name-only controls |
-| Positive vs positive/negative | Dataset-dependent; no universal benefit | Not prioritized unless a locked finalist is close |
-| Generalization | Rankings reverse across existing datasets | Final two-dataset macro, then optional third dataset |
+| Single vs multi-class | Dataset-dependent reversal; multi is the shared macro/efficiency choice, but single was not a locked finalist | Optional locked three-arm replication on a new dataset |
+| Reasoning level | Resolved for current recipe family: low failed the locked gate, medium skipped | None unless model/provider behavior changes |
+| Number of examples | Two selected for shared noise-aware efficiency; one remains plausible for Orion alone | Optional new-dataset replication of one versus two |
+| Numeric vs drawn | Locked numeric winner: tied on Dreidel, materially stronger on Orion | None for current recipe |
+| Explicit vs minimal anonymous | Resolved on Dreidel: explicit is consistently stronger | Replicate only if anonymous prompting becomes a product requirement |
+| Anonymous single vs multi | Both completed on Dreidel; multi has higher point estimates but settings differ | Locked matched comparison only if names cannot be supplied |
+| Self-generated names | Resolved for current setting: did not advance | None while real names are available |
+| Positive vs positive/negative | Positive-only selected; negatives gave no consistent gain | None unless a new domain supplies meaningful counterexamples |
+| Generalization | Locked decision covers Dreidel and Orion; earlier Lacrosse evidence supports one-call prompting but rankings vary | One preselected locked external dataset with three minimal arms |
 
-Do not add a broad new factorial while the current adaptive pipeline is active.
-New ideas should be added to this table with a hypothesis, smallest resolving
-experiment, stopping rule, and expected call cost.
+Avoid reopening the broad factorial. New work should start with the smallest
+experiment that tests external validity of the selected recipe and the known
+single-versus-multi interaction.
 
 ## Artifact index
 
@@ -633,6 +660,7 @@ experiment, stopping rule, and expected call cost.
 | Anonymous multi smoke | `qwen38-fsod-runs/final-recipe-study/anonymous-multi-api-smoke/` |
 | Adaptive final study | `qwen38-fsod-runs/final-recipe-study/` |
 | Final recipe report | `qwen38-fsod-runs/final-recipe-study/final-analysis/` |
+| Final decision rationale | `QWEN38_FINAL_RECIPE_DECISION.md` |
 
 Existing focused documents remain useful supporting notes:
 
@@ -658,6 +686,10 @@ When a stage completes:
 
 ## Change log
 
+- **2026-08-12:** Completed the adaptive study, measured ten-repeat noise floors,
+  finished anonymous and self-name screens, applied the reasoning gate, ran
+  locked finalists on Dreidel and Orion, generated bootstrap evidence, and
+  recorded the final recipe decision in `QWEN38_FINAL_RECIPE_DECISION.md`.
 - **2026-08-12:** Before the queued adaptive stages began, increased the
   variance calibration from five to ten complete repeats per dataset and
   added the previously missing Orion reasoning gate, conditional medium gate,
