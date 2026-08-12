@@ -54,7 +54,7 @@ if [[ ! -f qwen38-fsod-runs/dreidel-exemplar-only-box-combined-v1/_SUCCESS.json 
 fi
 
 # Establish the residual fixed-test noise floor before making any close-call
-# selection. Each dataset gets five identical complete repeats with all known
+# selection. Each dataset gets ten identical complete repeats with all known
 # sampling controls fixed.
 run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   python evaluate_qwen38_recipe.py \
@@ -105,6 +105,7 @@ run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   --box-count "$box_count" || exit $?
 
 mapfile -t dreidel_ids < <(jq -r '.dreidel[]' "$STUDY_DIR/subset_image_ids.json")
+mapfile -t orion_ids < <(jq -r '.orion[]' "$STUDY_DIR/subset_image_ids.json")
 run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   python evaluate_qwen38_recipe.py \
   --dataset-dir "$DREIDEL" \
@@ -119,17 +120,6 @@ run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   --self-name-screen-summary "$STUDY_DIR/dreidel-self-name-screen/comparison_summary.json" \
   --output-dir "$STUDY_DIR" || exit $?
 
-# A small temperature-zero reasoning gate answers the remaining reasoning
-# question without paying for full low-reasoning runs.
-run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
-  python evaluate_qwen38_recipe.py \
-  --dataset-dir "$DREIDEL" \
-  --conditions "$STUDY_DIR/reasoning_gate_conditions.json" \
-  --self-names-json "$STUDY_DIR/dreidel-self-names/self_names.json" \
-  --output-dir "$STUDY_DIR/dreidel-reasoning-gate" \
-  --image-ids "${dreidel_ids[@]}" \
-  "${COMMON[@]}" || exit $?
-
 # Generate the label-free names independently from Orion's train split so no
 # test data or Dreidel vocabulary crosses datasets.
 run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
@@ -140,11 +130,77 @@ run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   --box-count "$box_count" \
   --allow-shared-reference-images || exit $?
 
+# The locked reasoning gate uses the same recipes and deterministic 20-image
+# selection on both datasets. Low must clear each dataset's measured noise
+# floor; medium is generated and run only for an arm that passes.
+run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python evaluate_qwen38_recipe.py \
+  --dataset-dir "$DREIDEL" \
+  --conditions "$STUDY_DIR/reasoning_gate_conditions.json" \
+  --self-names-json "$STUDY_DIR/dreidel-self-names/self_names.json" \
+  --output-dir "$STUDY_DIR/dreidel-reasoning-gate" \
+  --image-ids "${dreidel_ids[@]}" \
+  "${COMMON[@]}" || exit $?
+
+run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python evaluate_qwen38_recipe.py \
+  --dataset-dir "$ORION" \
+  --conditions "$STUDY_DIR/reasoning_gate_conditions.json" \
+  --self-names-json "$STUDY_DIR/orion-self-names/self_names.json" \
+  --output-dir "$STUDY_DIR/orion-reasoning-gate" \
+  --image-ids "${orion_ids[@]}" \
+  --allow-shared-reference-images \
+  "${COMMON[@]}" || exit $?
+
+"$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python analyze_qwen38_recipe_study.py prepare-medium \
+  --dreidel-summary "$STUDY_DIR/dreidel-reasoning-gate/comparison_summary.json" \
+  --orion-summary "$STUDY_DIR/orion-reasoning-gate/comparison_summary.json" \
+  --noise-floor "$STUDY_DIR/noise_floor.json" \
+  --output-dir "$STUDY_DIR" || exit $?
+
+medium_count=$(jq '.conditions | length' "$STUDY_DIR/reasoning_medium_conditions.json")
+reasoning_resolution_args=()
+if (( medium_count > 0 )); then
+  run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
+    python evaluate_qwen38_recipe.py \
+    --dataset-dir "$DREIDEL" \
+    --conditions "$STUDY_DIR/reasoning_medium_conditions.json" \
+    --self-names-json "$STUDY_DIR/dreidel-self-names/self_names.json" \
+    --output-dir "$STUDY_DIR/dreidel-reasoning-medium" \
+    --image-ids "${dreidel_ids[@]}" \
+    "${COMMON[@]}" || exit $?
+
+  run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
+    python evaluate_qwen38_recipe.py \
+    --dataset-dir "$ORION" \
+    --conditions "$STUDY_DIR/reasoning_medium_conditions.json" \
+    --self-names-json "$STUDY_DIR/orion-self-names/self_names.json" \
+    --output-dir "$STUDY_DIR/orion-reasoning-medium" \
+    --image-ids "${orion_ids[@]}" \
+    --allow-shared-reference-images \
+    "${COMMON[@]}" || exit $?
+  reasoning_resolution_args+=(
+    --dreidel-medium-summary "$STUDY_DIR/dreidel-reasoning-medium/comparison_summary.json"
+    --orion-medium-summary "$STUDY_DIR/orion-reasoning-medium/comparison_summary.json"
+  )
+fi
+
+"$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python analyze_qwen38_recipe_study.py finalize-reasoning \
+  --dreidel-summary "$STUDY_DIR/dreidel-reasoning-gate/comparison_summary.json" \
+  --orion-summary "$STUDY_DIR/orion-reasoning-gate/comparison_summary.json" \
+  --noise-floor "$STUDY_DIR/noise_floor.json" \
+  --low-decision "$STUDY_DIR/reasoning_low_decision.json" \
+  --base-finalists "$STUDY_DIR/finalist_conditions.json" \
+  --output-dir "$STUDY_DIR" \
+  "${reasoning_resolution_args[@]}" || exit $?
+
 # These are the only full temperature-zero reruns: the shortlisted recipes.
 run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   python evaluate_qwen38_recipe.py \
   --dataset-dir "$DREIDEL" \
-  --conditions "$STUDY_DIR/finalist_conditions.json" \
+  --conditions "$STUDY_DIR/finalist_conditions_resolved.json" \
   --self-names-json "$STUDY_DIR/dreidel-self-names/self_names.json" \
   --output-dir "$STUDY_DIR/dreidel-finalists" \
   "${COMMON[@]}" || exit $?
@@ -152,10 +208,20 @@ run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
 run_resumable "$UV_BIN" run --with-requirements requirements-cosmos.txt \
   python evaluate_qwen38_recipe.py \
   --dataset-dir "$ORION" \
-  --conditions "$STUDY_DIR/finalist_conditions.json" \
+  --conditions "$STUDY_DIR/finalist_conditions_resolved.json" \
   --self-names-json "$STUDY_DIR/orion-self-names/self_names.json" \
   --output-dir "$STUDY_DIR/orion-finalists" \
   --allow-shared-reference-images \
   "${COMMON[@]}" || exit $?
 
-echo "All Qwen3.8 recipe-study inference stages completed successfully."
+"$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python analyze_qwen38_recipe_study.py final-report \
+  --dreidel-run "$STUDY_DIR/dreidel-finalists" \
+  --orion-run "$STUDY_DIR/orion-finalists" \
+  --dreidel-annotations "$DREIDEL/test/_annotations.coco.json" \
+  --orion-annotations "$ORION/test/_annotations.coco.json" \
+  --noise-floor "$STUDY_DIR/noise_floor.json" \
+  --output-dir "$STUDY_DIR/final-analysis" \
+  --bootstrap-iterations 500 || exit $?
+
+echo "All Qwen3.8 recipe-study inference and analysis stages completed successfully."

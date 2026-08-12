@@ -517,22 +517,29 @@ The remaining stages are predeclared and run sequentially to avoid API-quota
 contention:
 
 1. Finish and combine anonymous 7/10-box records.
-2. Run five identical full-test multi-class-name repetitions on Dreidel and
-   five on Orion at temperature zero, seed 1234, and reasoning none.
+2. Run ten identical full-test multi-class-name repetitions on Dreidel and
+   ten on Orion at temperature zero, seed 1234, and reasoning none. This was
+   increased from five before launch to reduce uncertainty in the variance
+   estimate at low incremental cost.
 3. Compute each dataset's fixed-test residual noise floor.
 4. Run the full 20-condition anonymous multi-class count grid on Dreidel at
    temperature zero.
 5. Generate cached train-only visual names.
 6. Run the stratified self-name causal screen.
-7. Run the small none-versus-low reasoning gate.
-8. Run shortlisted finalists on full Dreidel and Orion at temperature zero.
-9. Rank accuracy and efficiency using the locked decision rules below.
+7. Run the same small none-versus-low reasoning gate on deterministic
+   20-image subsets of both datasets. Test medium only for an arm whose low
+   setting clears `max(1 mAP, noise floor)` on both datasets.
+8. Resolve reasoning effort before running shortlisted finalists on full
+   Dreidel and Orion at temperature zero.
+9. Automatically produce the two-dataset macro ranking, efficiency metrics,
+   failure counts, paired-image bootstrap evidence for close candidates, and
+   final accuracy-first and throughput-first selections.
 
 ## Locked decision rules for future conclusions
 
 ### Residual API noise
 
-Each dataset receives five identical complete repeats with temperature zero,
+Each dataset receives ten identical complete repeats with temperature zero,
 seed 1234, reasoning none, and the same prompt. For mAP and mAP50 separately:
 
 `tie threshold = max(observed repeat range, 1.96 * sqrt(2) * sample SD)`
@@ -625,6 +632,7 @@ experiment, stopping rule, and expected call cost.
 | Temperature calibration | `qwen38-fsod-runs/final-recipe-study/temperature_calibration.json` |
 | Anonymous multi smoke | `qwen38-fsod-runs/final-recipe-study/anonymous-multi-api-smoke/` |
 | Adaptive final study | `qwen38-fsod-runs/final-recipe-study/` |
+| Final recipe report | `qwen38-fsod-runs/final-recipe-study/final-analysis/` |
 
 Existing focused documents remain useful supporting notes:
 
@@ -650,6 +658,11 @@ When a stage completes:
 
 ## Change log
 
+- **2026-08-12:** Before the queued adaptive stages began, increased the
+  variance calibration from five to ten complete repeats per dataset and
+  added the previously missing Orion reasoning gate, conditional medium gate,
+  reasoning-aware finalist resolution, and automatic final macro/efficiency/
+  bootstrap report.
 - **2026-08-12:** Created the canonical chronological log from existing
   manifests, progress files, score summaries, focused documentation, and git
   history. Recorded every completed scored experiment, non-scored smoke,

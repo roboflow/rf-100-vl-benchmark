@@ -27,7 +27,7 @@ def metric_summary(values: list[float]) -> dict[str, Any]:
     observed_range = max(values) - min(values)
     pairwise = [abs(left - right) for left, right in combinations(values, 2)]
     repeatability_limit = 1.96 * math.sqrt(2) * sample_sd
-    # With only five repeats, never claim a floor below a difference actually
+    # With a finite repeat set, never claim a floor below a difference actually
     # observed. The normal-theory repeatability limit protects beyond that
     # finite set when variance is nonzero.
     tie_threshold = max(observed_range, repeatability_limit)
@@ -54,7 +54,7 @@ def records_by_image(run_directory: Path, mode: str) -> dict[int, dict[str, Any]
 def analyze_run(name: str, run_directory: Path) -> dict[str, Any]:
     comparison = json.loads((run_directory / "comparison_summary.json").read_text())
     rows = sorted(comparison["rows"], key=lambda value: value["mode"])
-    if len(rows) < 3 or not all(row.get("complete") for row in rows):
+    if len(rows) != 10 or not all(row.get("complete") for row in rows):
         raise ValueError(f"Noise-floor run is incomplete: {run_directory}")
     structural = {
         (
@@ -136,7 +136,7 @@ def main() -> int:
     result = {
         "created_at": base.utc_now(),
         "method": (
-            "Five identical full-test repeats at temperature=0, seed=1234, and "
+            "Ten identical full-test repeats at temperature=0, seed=1234, and "
             "reasoning=none. The per-dataset tie threshold is max(observed score "
             "range, 1.96*sqrt(2)*sample SD)."
         ),
