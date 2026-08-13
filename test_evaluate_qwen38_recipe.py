@@ -98,6 +98,13 @@ def test_single_and_multi_task_counts(dataset):
     tasks = recipe.build_tasks(test, categories, conditions)
     assert len(tasks) == len(test["images"]) * (len(categories) + 1)
     assert len({task.key for task in tasks}) == len(tasks)
+    first_image_id = int(test["images"][0]["id"])
+    first_image_tasks = [task for task in tasks if task.image_id == first_image_id]
+    assert [task.mode for task in first_image_tasks] == [
+        *(["single"] * len(categories)),
+        "multi",
+    ]
+    assert all(task.image_id == first_image_id for task in tasks[: len(first_image_tasks)])
 
 
 def test_labels_are_unique_and_semantic_names_are_hidden(dataset):

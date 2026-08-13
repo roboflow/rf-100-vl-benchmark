@@ -154,8 +154,11 @@ def build_tasks(
     conditions: Sequence[Condition],
 ) -> list[base.Task]:
     tasks: list[base.Task] = []
-    for condition in conditions:
-        for image in sorted(test["images"], key=lambda value: int(value["id"])):
+    # Keep conditions adjacent for each target image. This prevents a provider
+    # change or serving-replica drift over a long dataset from being perfectly
+    # confounded with condition order, while remaining deterministic/resumable.
+    for image in sorted(test["images"], key=lambda value: int(value["id"])):
+        for condition in conditions:
             common = {
                 "mode": condition.mode,
                 "image_id": int(image["id"]),
