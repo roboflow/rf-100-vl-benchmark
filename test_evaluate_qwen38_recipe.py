@@ -202,6 +202,39 @@ def test_condition_settings_explicitly_disable_both_thinking_paths():
     assert settings["enable_thinking"] is False
 
 
+def test_prediction_shaped_numeric_reference_exactly_matches_output_schema(dataset):
+    test, categories, references, assets, self_names = dataset
+    condition = recipe.Condition(
+        mode="numeric_prediction",
+        formulation="multi",
+        semantics="class_names",
+        representation="numeric_prediction",
+        box_count=1,
+    )
+    task = make_task(condition.mode, "multi", test, categories)
+    messages = recipe.build_messages(
+        task,
+        condition,
+        DATASET / "test",
+        categories,
+        self_names,
+        references,
+        assets,
+    )
+    content = messages[0]["content"]
+    reference_annotations = []
+    for part in content:
+        if part["type"] != "text" or not part["text"].startswith("[{"):
+            continue
+        value = json.loads(part["text"])
+        assert isinstance(value, list) and len(value) == 1
+        assert list(value[0]) == ["bbox_2d", "label"]
+        assert isinstance(value[0]["bbox_2d"], list) and len(value[0]["bbox_2d"]) == 4
+        assert value[0]["label"] in categories.values()
+        reference_annotations.append(value[0])
+    assert len(reference_annotations) == len(categories)
+
+
 @pytest.mark.parametrize(
     "value",
     [

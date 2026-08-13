@@ -37,7 +37,7 @@ SEMANTICS = {
     "self_name",
     "self_name_only",
 }
-REPRESENTATIONS = {"none", "numeric", "drawn"}
+REPRESENTATIONS = {"none", "numeric", "numeric_prediction", "drawn"}
 REASONING_EFFORTS = {"none", "low", "medium"}
 TERMINAL_STATUSES = base.TERMINAL_STATUSES
 
@@ -205,7 +205,12 @@ def _append_references(
         if not condition.single_class:
             content.append({"type": "text", "text": f"REFERENCE GROUP {label}:"})
         for reference in references[category_id][: condition.box_count]:
-            if condition.representation == "numeric":
+            if condition.representation in {"numeric", "numeric_prediction"}:
+                annotation: dict[str, Any] = {
+                    "bbox_2d": list(reference.bbox_xyxy_1000)
+                }
+                if condition.representation == "numeric_prediction":
+                    annotation["label"] = label
                 content.extend(
                     [
                         {
@@ -218,8 +223,13 @@ def _append_references(
                         },
                         {
                             "type": "text",
+                            # The experimental numeric_prediction variant is
+                            # byte-shape compatible with the requested output:
+                            # a list of objects containing bbox_2d and label.
                             "text": json.dumps(
-                                {"bbox_2d": list(reference.bbox_xyxy_1000)},
+                                [annotation]
+                                if condition.representation == "numeric_prediction"
+                                else annotation,
                                 separators=(",", ":"),
                             ),
                         },

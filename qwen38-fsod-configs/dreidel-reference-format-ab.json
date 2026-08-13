@@ -1,0 +1,22 @@
+{
+  "conditions": [
+    {
+      "mode": "numeric_grouped_b01",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric",
+      "box_count": 1,
+      "reasoning_effort": "none",
+      "seed": 1234
+    },
+    {
+      "mode": "numeric_prediction_shaped_b01",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 1,
+      "reasoning_effort": "none",
+      "seed": 1234
+    }
+  ]
+}
