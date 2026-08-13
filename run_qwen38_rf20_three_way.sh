@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
-  echo "DASHSCOPE_API_KEY is required." >&2
-  exit 1
-fi
-
 UV_BIN=${UV_BIN:-/home/matveipopov/.local/bin/uv}
 DATASET_ROOT=${DATASET_ROOT:-RF100VL/rf20-vl-fsod}
 RUN_ROOT=${RUN_ROOT:-qwen38-fsod-runs/rf20-three-way-v1}
 CONDITIONS=${CONDITIONS:-qwen38-fsod-configs/rf20-three-way.json}
 MAX_PASSES=${MAX_PASSES:-6}
+PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
 COMMON=(
   --concurrency 256
   --requests-per-minute 13500
@@ -28,6 +24,21 @@ if [[ ${#datasets[@]} -ne 20 ]]; then
 fi
 
 mkdir -p "$RUN_ROOT"
+"$UV_BIN" run --with-requirements requirements-cosmos.txt \
+  python preflight_qwen38_rf20.py \
+  --dataset-root "$DATASET_ROOT" \
+  --conditions "$CONDITIONS" \
+  --report "$RUN_ROOT/preflight.json"
+
+if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
+  echo "RF20 launch preflight completed; inference intentionally skipped."
+  exit 0
+fi
+if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
+  echo "DASHSCOPE_API_KEY is required for inference." >&2
+  exit 1
+fi
+
 for dataset in "${datasets[@]}"; do
   status=1
   for ((attempt = 1; attempt <= MAX_PASSES; attempt++)); do

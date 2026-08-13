@@ -44,6 +44,24 @@ TERMINAL_STATUSES = base.TERMINAL_STATUSES
 LOGGER = logging.getLogger("qwen38_recipe")
 
 
+def detection_object(bbox: Sequence[Any], label: str) -> dict[str, Any]:
+    """Build the one canonical Qwen3.8 detection/reference object."""
+
+    return {"bbox_2d": list(bbox), "label": label}
+
+
+def detection_list_json(
+    detections: Sequence[tuple[Sequence[Any], str]],
+) -> str:
+    """Serialize references in exactly the same JSON shape as predictions."""
+
+    return json.dumps(
+        [detection_object(bbox, label) for bbox, label in detections],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
 @dataclass(frozen=True)
 class Condition:
     mode: str
@@ -183,9 +201,15 @@ def build_tasks(
 
 
 def _output_contract(labels: Sequence[str]) -> str:
+    example = (
+        detection_list_json([(["x1", "y1", "x2", "y2"], "exact requested label")])
+        .replace('"x1"', "x1")
+        .replace('"y1"', "y1")
+        .replace('"x2"', "x2")
+        .replace('"y2"', "y2")
+    )
     return (
-        "Return only a JSON list exactly like "
-        '[{"bbox_2d":[x1,y1,x2,y2],"label":"exact requested label"}]. '
+        f"Return only a JSON list exactly like {example}. "
         "Use XYXY integer coordinates normalized independently from 0 to 1000 "
         "relative to the TARGET IMAGE, with origin at top-left. Use only these "
         f"labels: {json.dumps(list(labels), ensure_ascii=False)}. Return [] if none."
@@ -206,11 +230,14 @@ def _append_references(
             content.append({"type": "text", "text": f"REFERENCE GROUP {label}:"})
         for reference in references[category_id][: condition.box_count]:
             if condition.representation in {"numeric", "numeric_prediction"}:
-                annotation: dict[str, Any] = {
-                    "bbox_2d": list(reference.bbox_xyxy_1000)
-                }
-                if condition.representation == "numeric_prediction":
-                    annotation["label"] = label
+                reference_text = (
+                    detection_list_json([(reference.bbox_xyxy_1000, label)])
+                    if condition.representation == "numeric_prediction"
+                    else json.dumps(
+                        {"bbox_2d": list(reference.bbox_xyxy_1000)},
+                        separators=(",", ":"),
+                    )
+                )
                 content.extend(
                     [
                         {
@@ -226,12 +253,7 @@ def _append_references(
                             # The experimental numeric_prediction variant is
                             # byte-shape compatible with the requested output:
                             # a list of objects containing bbox_2d and label.
-                            "text": json.dumps(
-                                [annotation]
-                                if condition.representation == "numeric_prediction"
-                                else annotation,
-                                separators=(",", ":"),
-                            ),
+                            "text": reference_text,
                         },
                     ]
                 )

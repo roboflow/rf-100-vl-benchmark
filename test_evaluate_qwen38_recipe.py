@@ -235,6 +235,17 @@ def test_prediction_shaped_numeric_reference_exactly_matches_output_schema(datas
     assert len(reference_annotations) == len(categories)
 
 
+def test_detection_reference_and_output_examples_share_one_serializer():
+    serialized = recipe.detection_list_json(
+        [([100, 200, 300, 400], "widget")]
+    )
+    assert serialized == '[{"bbox_2d":[100,200,300,400],"label":"widget"}]'
+    assert (
+        '[{"bbox_2d":[x1,y1,x2,y2],"label":"exact requested label"}]'
+        in recipe._output_contract(["widget"])
+    )
+
+
 @pytest.mark.parametrize(
     "value",
     [
