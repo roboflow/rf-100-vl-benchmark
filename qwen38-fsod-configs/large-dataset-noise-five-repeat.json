@@ -1,0 +1,14 @@
+{
+  "conditions": [
+    {"mode":"names_repeat_01","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_repeat_01","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"names_repeat_02","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_repeat_02","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"names_repeat_03","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_repeat_03","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"names_repeat_04","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_repeat_04","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"names_repeat_05","formulation":"multi","semantics":"class_names","representation":"none","box_count":0,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_repeat_05","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234}
+  ]
+}
