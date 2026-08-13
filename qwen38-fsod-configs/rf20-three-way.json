@@ -10,19 +10,19 @@
       "seed": 1234
     },
     {
-      "mode": "numeric_b01_multi",
+      "mode": "numeric_prediction_b01_multi",
       "formulation": "multi",
       "semantics": "class_names",
-      "representation": "numeric",
+      "representation": "numeric_prediction",
       "box_count": 1,
       "reasoning_effort": "none",
       "seed": 1234
     },
     {
-      "mode": "numeric_b02_multi",
+      "mode": "numeric_prediction_b02_multi",
       "formulation": "multi",
       "semantics": "class_names",
-      "representation": "numeric",
+      "representation": "numeric_prediction",
       "box_count": 2,
       "reasoning_effort": "none",
       "seed": 1234
