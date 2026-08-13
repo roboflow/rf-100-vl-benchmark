@@ -15,32 +15,36 @@ All other request content and settings were held fixed.
 
 ## Experiment
 
-- Dataset: complete Dreidel RF20-VL-FSOD test split, 54 images and 6 classes.
+- Datasets: complete Dreidel, Orion, and Lacrosse RF20-VL-FSOD test splits;
+  163 images total.
 - Recipe: one positive train reference per class, one multi-class call per target.
 - Model/settings: Qwen3.8-Max, temperature 0, seed 1234, reasoning disabled.
 - Execution: the two conditions were interleaved by target image.
-- Completion: 108/108 successful requests; zero failures or errors.
+- Completion: 326/326 successful requests; zero failures or errors.
 - Scoring: `pycocotools`, `maxDets=[1,10,500]`.
 
-| Reference annotation | mAP50–95 | mAP50 | Mean latency | Estimated cost |
-|---|---:|---:|---:|---:|
-| Grouped box only | 50.37 | 72.44 | 8.55 s | $0.57 |
-| Prediction-shaped box + label | 50.98 | 74.42 | 8.34 s | $0.55 |
-| Delta, prediction-shaped minus grouped | +0.61 | +1.98 | -0.20 s | -$0.03 |
+| Dataset | Grouped mAP50–95 / mAP50 | Prediction-shaped mAP50–95 / mAP50 | Delta |
+|---|---:|---:|---:|
+| Dreidel | 50.37 / 72.44 | 50.98 / 74.42 | +0.61 / +1.98 |
+| Orion | 15.09 / 36.40 | 18.39 / 43.19 | +3.30 / +6.79 |
+| Lacrosse | 33.63 / 56.11 | 33.69 / 55.83 | +0.06 / -0.27 |
+| Three-dataset macro | 33.03 / 54.98 | 34.35 / 57.82 | **+1.32 / +2.83** |
 
-A 500-resample paired-image bootstrap gave a 95% interval of
-`[-2.46,+4.04]` for the mAP50–95 delta and `[-3.97,+5.46]` for the mAP50
-delta. Both include zero, and the point differences are below Dreidel's
-previously measured API-variance floor.
+The 500-resample paired-image mAP50–95 intervals were `[-2.46,+4.04]` on
+Dreidel, `[+1.08,+5.93]` on Orion, and `[-1.82,+2.47]` on Lacrosse. Orion's
+paired result resolves in favor of prediction-shaped references; Dreidel and
+Lacrosse are ties. Lacrosse's small negative mAP50 delta is well within noise.
+The complete three-dataset test cost an estimated $2.61.
 
 ## Decision
 
-The formats are practically tied on this test. There is no evidence that the
-extra label/list wrapper materially improves accuracy, but it also caused no
-degradation or cost/latency penalty. Use the prediction-shaped form in the
-RF20 scale-up because it exactly matches the requested output schema and is
-therefore the cleaner format contract—not because this A/B establishes an
-accuracy improvement.
+Use the prediction-shaped form in the RF20 scale-up. It exactly matches the
+requested output schema, improves the three-dataset macro, materially helps
+Orion, and has no resolved regression on Dreidel or Lacrosse. The evidence does
+not establish a universal accuracy gain—the per-dataset effects include two
+ties—but it removes a needless input/output schema discrepancy without an
+observed downside.
 
-Raw responses, predictions, metrics, usage, and the paired bootstrap are under
-`qwen38-fsod-runs/reference-format-ab-dreidel-v1/` in the experiment workspace.
+Raw responses, predictions, metrics, usage, and paired bootstraps are under the
+three `qwen38-fsod-runs/reference-format-ab-*-v1/` directories in the
+experiment workspace.
