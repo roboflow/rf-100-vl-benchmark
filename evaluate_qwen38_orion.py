@@ -626,6 +626,91 @@ def retryable_error(error: Exception) -> bool:
     )
 
 
+def terminal_provider_rejection(error: Exception | str) -> bool:
+    """Return whether the provider explicitly refused to inspect the input.
+
+    These are deterministic request-level moderation refusals rather than
+    transient inference failures.  Retrying cannot recover a prediction and
+    can otherwise prevent a resumable dataset run from ever completing.
+    Keep this deliberately narrow so ordinary 400s remain visible errors.
+    """
+
+    message = str(error).casefold()
+    markers = (
+        "data_inspection_failed",
+        "datainspectionfailed",
+        "data inspection failed",
+        "input image data may contain inappropriate content",
+    )
+    return any(marker in message for marker in markers)
+
+
+def provider_request_error(error: Exception | str) -> bool:
+    """Recognize provider/transport errors without swallowing local bugs."""
+
+    if not isinstance(error, str) and getattr(error, "status_code", None) is not None:
+        return True
+    name = type(error).__name__.casefold() if not isinstance(error, str) else ""
+    message = str(error).casefold()
+    provider_markers = (
+        "apierror",
+        "apiconnectionerror",
+        "apitimeouterror",
+        "badrequesterror",
+        "ratelimiterror",
+        "internalservererror",
+        "error code: 4",
+        "error code: 5",
+        "http/1.1 4",
+        "http/1.1 5",
+        "<400>",
+        "<401>",
+        "<403>",
+        "<408>",
+        "<409>",
+        "<429>",
+        "<500>",
+        "<502>",
+        "<503>",
+        "<504>",
+        "connection reset",
+        "connection refused",
+        "request timed out",
+    )
+    return terminal_provider_rejection(error) or any(
+        marker in name or marker in message for marker in provider_markers
+    )
+
+
+def terminalize_provider_failure(record: dict[str, Any]) -> dict[str, Any]:
+    """Promote a saved request-level provider error to a terminal failure.
+
+    Require recorded API attempts so a local worker/configuration exception is
+    never silently converted into a scored miss.
+    """
+
+    error = str(record.get("error") or "")
+    if (
+        record.get("status") != "error"
+        or not record.get("attempts")
+        or not provider_request_error(error)
+    ):
+        return record
+    failure_type = (
+        "provider_content_rejection"
+        if terminal_provider_rejection(error)
+        else "provider_request_failure"
+    )
+    return {
+        **record,
+        "status": "model_failure",
+        "failure_type": failure_type,
+        "raw_response": None,
+        "predictions": [],
+        "terminalized_at": utc_now(),
+    }
+
+
 def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
     sampling_parameters = {}
@@ -818,7 +903,40 @@ def execute_task(
                     "error": f"{type(error).__name__}: {error}",
                 }
             )
-            if attempt > max_retries or not retryable_error(error):
+            if terminal_provider_rejection(error):
+                return {
+                    "status": "model_failure",
+                    "failure_type": "provider_content_rejection",
+                    "error": f"{type(error).__name__}: {error}",
+                    "task": asdict(task),
+                    "task_key": task.key,
+                    "request_fingerprint": fingerprint,
+                    "request_summary": summary,
+                    "raw_response": None,
+                    "predictions": [],
+                    "attempts": attempts,
+                    "elapsed_seconds": time.monotonic() - started,
+                    "completed_at": utc_now(),
+                }
+            retryable = retryable_error(error)
+            if attempt > max_retries or not retryable:
+                if provider_request_error(error):
+                    return {
+                        "status": "model_failure",
+                        "failure_type": "provider_request_failure",
+                        "error": f"{type(error).__name__}: {error}",
+                        "task": asdict(task),
+                        "task_key": task.key,
+                        "request_fingerprint": fingerprint,
+                        "request_summary": summary,
+                        "raw_response": None,
+                        "predictions": [],
+                        "attempts": attempts,
+                        "retryable": retryable,
+                        "retries_exhausted": attempt > max_retries,
+                        "elapsed_seconds": time.monotonic() - started,
+                        "completed_at": utc_now(),
+                    }
                 return {
                     "status": "error",
                     "error": f"{type(error).__name__}: {error}",

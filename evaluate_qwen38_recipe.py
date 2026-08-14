@@ -454,6 +454,11 @@ def finalize(
         )
         metrics = base.score_coco(annotation_path, predictions) if complete else None
         usage = _usage(records)
+        failure_types: dict[str, int] = {}
+        for record in records:
+            failure_type = record.get("failure_type")
+            if failure_type:
+                failure_types[str(failure_type)] = failure_types.get(str(failure_type), 0) + 1
         summary = {
             "condition": asdict(condition),
             "complete": complete,
@@ -461,6 +466,7 @@ def finalize(
             "calls_per_image": class_count if condition.single_class else 1,
             "reference_images_per_request": expected_images_per_request(condition, class_count) - 1,
             "statuses": statuses,
+            "failure_types": failure_types,
             "prediction_count": len(predictions),
             "usage": usage,
             "metrics": metrics,
@@ -493,6 +499,19 @@ def finalize(
         "image_count": image_count,
         "class_count": class_count,
         "modes": modes,
+        "provider_failure_policy": {
+            "policy": "terminal-zero-detection-after-nonretryable-or-exhausted-request-error-v1",
+            "provider_failure_count": sum(
+                value["failure_types"].get("provider_content_rejection", 0)
+                + value["failure_types"].get("provider_request_failure", 0)
+                for value in modes.values()
+            ),
+            "requires_review": any(
+                value["failure_types"].get("provider_content_rejection", 0)
+                + value["failure_types"].get("provider_request_failure", 0)
+                for value in modes.values()
+            ),
+        },
     }
     base.atomic_write_json(output_directory / "aggregate_metrics.json", aggregate)
     base.atomic_write_json(
@@ -556,6 +575,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit-per-mode", type=int)
     parser.add_argument("--allow-shared-reference-images", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--retry-terminal-provider-failures",
+        action="store_true",
+        help=(
+            "Re-open previously terminal provider request failures. Successful "
+            "checkpoints and other model failures remain untouched."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -721,6 +748,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             task, condition, test_directory, categories, self_names, references, assets
         )
         existing = base.load_record(record_path(output_directory, task))
+        if existing:
+            terminal = base.terminalize_provider_failure(existing)
+            if terminal is not existing:
+                expected = base.request_fingerprint(
+                    task, base.request_summary(messages), settings
+                )
+                if (
+                    existing.get("task_key") != task.key
+                    or existing.get("request_fingerprint") != expected
+                ):
+                    raise ValueError(
+                        f"Mismatched provider-rejection checkpoint: {task.key}"
+                    )
+                base.atomic_write_json(record_path(output_directory, task), terminal)
+                existing = terminal
+        if (
+            existing
+            and args.retry_terminal_provider_failures
+            and existing.get("status") == "model_failure"
+            and existing.get("failure_type")
+            in {"provider_content_rejection", "provider_request_failure"}
+        ):
+            existing = None
         if existing and existing.get("status") in TERMINAL_STATUSES:
             expected = base.request_fingerprint(task, base.request_summary(messages), settings)
             if existing.get("task_key") != task.key or existing.get("request_fingerprint") != expected:

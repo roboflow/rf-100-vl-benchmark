@@ -202,6 +202,20 @@ def test_condition_settings_explicitly_disable_both_thinking_paths():
     assert settings["enable_thinking"] is False
 
 
+def test_retry_terminal_provider_failures_is_explicit_opt_in():
+    assert recipe.parse_args(
+        ["--dataset-dir", ".", "--conditions", "conditions.json", "--output-dir", "out"]
+    ).retry_terminal_provider_failures is False
+    assert recipe.parse_args(
+        [
+            "--dataset-dir", ".",
+            "--conditions", "conditions.json",
+            "--output-dir", "out",
+            "--retry-terminal-provider-failures",
+        ]
+    ).retry_terminal_provider_failures is True
+
+
 def test_prediction_shaped_numeric_reference_exactly_matches_output_schema(dataset):
     test, categories, references, assets, self_names = dataset
     condition = recipe.Condition(

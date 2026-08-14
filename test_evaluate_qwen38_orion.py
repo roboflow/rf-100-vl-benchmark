@@ -134,6 +134,142 @@ def test_retryable_provider_errors_are_recognized(error):
     assert qwen.retryable_error(error)
 
 
+def test_content_inspection_rejection_is_terminal_model_failure(monkeypatch):
+    class ProviderError(Exception):
+        status_code = 400
+
+    error = ProviderError(
+        "InternalError.Algo.DataInspectionFailed: Input image data may contain "
+        "inappropriate content. code=data_inspection_failed"
+    )
+    monkeypatch.setattr(
+        qwen,
+        "stream_inference",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+    task = qwen.Task(
+        mode="multi_class_names",
+        image_id=1,
+        file_name="unused.jpg",
+        width=100,
+        height=100,
+        category_id=None,
+        category_name=None,
+    )
+    record = qwen.execute_task(
+        task,
+        object(),
+        Path("."),
+        {7: "object"},
+        {},
+        {},
+        {},
+        {
+            "reasoning_effort": "none",
+            "seed": 1234,
+            "timeout_seconds": 180.0,
+        },
+        max_retries=3,
+        messages_override=[
+            {"role": "user", "content": [{"type": "text", "text": "test"}]}
+        ],
+    )
+    assert record["status"] == "model_failure"
+    assert record["failure_type"] == "provider_content_rejection"
+    assert record["predictions"] == []
+    assert len(record["attempts"]) == 1
+
+
+def test_only_explicit_content_inspection_rejections_are_terminalized():
+    rejected = {
+        "status": "error",
+        "error": "BadRequestError: code=data_inspection_failed",
+        "predictions": [{"should": "be removed"}],
+    }
+    rejected["attempts"] = [{"attempt": 1, "status": "error"}]
+    terminal = qwen.terminalize_provider_failure(rejected)
+    assert terminal["status"] == "model_failure"
+    assert terminal["failure_type"] == "provider_content_rejection"
+    assert terminal["predictions"] == []
+    assert qwen.terminalize_provider_failure(
+        {"status": "error", "error": "400 invalid parameter"}
+    ) == {"status": "error", "error": "400 invalid parameter"}
+
+
+def test_exhausted_provider_error_continues_as_auditable_zero_detection(monkeypatch):
+    class ProviderError(Exception):
+        status_code = 503
+
+    monkeypatch.setattr(
+        qwen,
+        "stream_inference",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ProviderError("service unavailable")
+        ),
+    )
+    monkeypatch.setattr(qwen.time, "sleep", lambda _seconds: None)
+    task = qwen.Task(
+        mode="multi_class_names",
+        image_id=1,
+        file_name="unused.jpg",
+        width=100,
+        height=100,
+        category_id=None,
+        category_name=None,
+    )
+    record = qwen.execute_task(
+        task,
+        object(),
+        Path("."),
+        {7: "object"},
+        {},
+        {},
+        {},
+        {"reasoning_effort": "none", "seed": 1234, "timeout_seconds": 180.0},
+        max_retries=2,
+        messages_override=[
+            {"role": "user", "content": [{"type": "text", "text": "test"}]}
+        ],
+    )
+    assert record["status"] == "model_failure"
+    assert record["failure_type"] == "provider_request_failure"
+    assert record["retries_exhausted"] is True
+    assert record["predictions"] == []
+    assert len(record["attempts"]) == 3
+
+
+def test_local_programming_error_is_not_silently_scored(monkeypatch):
+    monkeypatch.setattr(
+        qwen,
+        "stream_inference",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("local bug")),
+    )
+    task = qwen.Task(
+        mode="multi_class_names",
+        image_id=1,
+        file_name="unused.jpg",
+        width=100,
+        height=100,
+        category_id=None,
+        category_name=None,
+    )
+    record = qwen.execute_task(
+        task,
+        object(),
+        Path("."),
+        {7: "object"},
+        {},
+        {},
+        {},
+        {"reasoning_effort": "none", "seed": 1234, "timeout_seconds": 180.0},
+        max_retries=3,
+        messages_override=[
+            {"role": "user", "content": [{"type": "text", "text": "test"}]}
+        ],
+    )
+    assert record["status"] == "error"
+
+
 def test_no_reasoning_is_an_explicit_supported_condition():
     args = qwen.parse_args(["--reasoning-effort", "none"])
     assert args.reasoning_effort == "none"
