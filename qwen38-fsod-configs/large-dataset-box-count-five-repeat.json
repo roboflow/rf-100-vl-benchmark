@@ -1,0 +1,19 @@
+{
+  "conditions": [
+    {"mode":"box_b01_repeat_01","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b02_repeat_01","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":2,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b05_repeat_01","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":5,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b01_repeat_02","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b02_repeat_02","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":2,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b05_repeat_02","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":5,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b01_repeat_03","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b02_repeat_03","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":2,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b05_repeat_03","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":5,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b01_repeat_04","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b02_repeat_04","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":2,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b05_repeat_04","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":5,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b01_repeat_05","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":1,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b02_repeat_05","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":2,"reasoning_effort":"none","seed":1234},
+    {"mode":"box_b05_repeat_05","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":5,"reasoning_effort":"none","seed":1234}
+  ]
+}
