@@ -649,23 +649,25 @@ def provider_request_error(error: Exception | str) -> bool:
     """Recognize provider/transport errors without swallowing local bugs."""
 
     if not isinstance(error, str) and getattr(error, "status_code", None) is not None:
-        return True
+        return terminal_provider_rejection(error) or getattr(error, "status_code") in {
+            408,
+            409,
+            429,
+            500,
+            502,
+            503,
+            504,
+        }
     name = type(error).__name__.casefold() if not isinstance(error, str) else ""
     message = str(error).casefold()
     provider_markers = (
         "apierror",
         "apiconnectionerror",
         "apitimeouterror",
-        "badrequesterror",
         "ratelimiterror",
         "internalservererror",
-        "error code: 4",
         "error code: 5",
-        "http/1.1 4",
         "http/1.1 5",
-        "<400>",
-        "<401>",
-        "<403>",
         "<408>",
         "<409>",
         "<429>",

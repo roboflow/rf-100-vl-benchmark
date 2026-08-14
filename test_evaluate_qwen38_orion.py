@@ -270,6 +270,17 @@ def test_local_programming_error_is_not_silently_scored(monkeypatch):
     assert record["status"] == "error"
 
 
+def test_authentication_and_generic_bad_requests_still_fail_closed():
+    class ProviderError(Exception):
+        def __init__(self, status_code, message):
+            super().__init__(message)
+            self.status_code = status_code
+
+    assert not qwen.provider_request_error(ProviderError(400, "invalid parameter"))
+    assert not qwen.provider_request_error(ProviderError(401, "invalid API key"))
+    assert not qwen.provider_request_error(ProviderError(403, "permission denied"))
+
+
 def test_no_reasoning_is_an_explicit_supported_condition():
     args = qwen.parse_args(["--reasoning-effort", "none"])
     assert args.reasoning_effort == "none"
