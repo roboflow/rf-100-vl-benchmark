@@ -33,6 +33,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -192,9 +193,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def data_url(path: Path) -> str:
+@lru_cache(maxsize=1024)
+def _data_url_cached(path: Path, modified_ns: int, size: int) -> str:
+    del modified_ns, size
     mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
     return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def data_url(path: Path) -> str:
+    """Reuse an encoding while invalidating the cache if the file changes."""
+    stat = path.stat()
+    return _data_url_cached(path, stat.st_mtime_ns, stat.st_size)
 
 
 def annotation_xywh_to_normalized_xyxy(
