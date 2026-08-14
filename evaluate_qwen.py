@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_KEY = "sk-3b2f44831cef43578534c5cbe8ecedd3" #os.getenv('DASHSCOPE_API_KEY')
+API_KEY = os.getenv('DASHSCOPE_API_KEY')
 
 rate_limiter = RateLimiter(REQUEST_LIMIT)
 
