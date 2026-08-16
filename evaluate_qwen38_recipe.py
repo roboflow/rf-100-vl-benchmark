@@ -71,6 +71,7 @@ class Condition:
     box_count: int
     reasoning_effort: str = "none"
     seed: int = 1234
+    group_reference_instances_by_image: bool = False
 
     @property
     def single_class(self) -> bool:
@@ -110,6 +111,13 @@ def load_conditions(path: Path) -> tuple[Condition, ...]:
             raise ValueError(f"Anonymous condition {condition.mode} needs references.")
         if condition.semantics == "self_name_only" and condition.uses_references:
             raise ValueError(f"self_name_only condition {condition.mode} cannot attach references.")
+        if (
+            condition.group_reference_instances_by_image
+            and condition.representation not in {"numeric", "numeric_prediction"}
+        ):
+            raise ValueError(
+                f"Grouped reference instances in {condition.mode} require a numeric representation."
+            )
     return conditions
 
 
@@ -228,7 +236,44 @@ def _append_references(
         label = labels[category_id]
         if not condition.single_class:
             content.append({"type": "text", "text": f"REFERENCE GROUP {label}:"})
-        for reference in references[category_id][: condition.box_count]:
+        selected_references = references[category_id][: condition.box_count]
+        if condition.group_reference_instances_by_image:
+            references_by_image: dict[int, list[box_ablation.ReferenceBox]] = {}
+            for reference in selected_references:
+                references_by_image.setdefault(reference.image_id, []).append(reference)
+            for image_references in references_by_image.values():
+                first = image_references[0]
+                reference_text = (
+                    detection_list_json(
+                        [
+                            (reference.bbox_xyxy_1000, label)
+                            for reference in image_references
+                        ]
+                    )
+                    if condition.representation == "numeric_prediction"
+                    else json.dumps(
+                        [
+                            {"bbox_2d": list(reference.bbox_xyxy_1000)}
+                            for reference in image_references
+                        ],
+                        separators=(",", ":"),
+                    )
+                )
+                content.extend(
+                    [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": base.data_url(
+                                    assets[(category_id, first.rank)]["source"]
+                                )
+                            },
+                        },
+                        {"type": "text", "text": reference_text},
+                    ]
+                )
+            continue
+        for reference in selected_references:
             if condition.representation in {"numeric", "numeric_prediction"}:
                 reference_text = (
                     detection_list_json([(reference.bbox_xyxy_1000, label)])
@@ -364,13 +409,34 @@ def condition_settings(condition: Condition, common: dict[str, Any]) -> dict[str
     }
 
 
-def expected_images_per_request(condition: Condition, class_count: int) -> int:
+def expected_images_per_request(
+    condition: Condition,
+    class_count: int,
+    references: dict[int, tuple[box_ablation.ReferenceBox, ...]] | None = None,
+) -> int:
     reference_classes = 1 if condition.single_class else class_count
+    if condition.group_reference_instances_by_image and references:
+        counts = [
+            len(
+                {
+                    reference.image_id
+                    for reference in sequence[: condition.box_count]
+                }
+            )
+            for sequence in references.values()
+        ]
+        # Multi-class requests include every class. A single-class run can
+        # vary by class, so use the maximum to avoid underestimating a request.
+        return 1 + (max(counts) if condition.single_class else sum(counts))
     return 1 + condition.box_count * reference_classes
 
 
-def token_estimate(condition: Condition, class_count: int) -> int:
-    return 3_000 * expected_images_per_request(condition, class_count) + 2_500
+def token_estimate(
+    condition: Condition,
+    class_count: int,
+    references: dict[int, tuple[box_ablation.ReferenceBox, ...]] | None = None,
+) -> int:
+    return 3_000 * expected_images_per_request(condition, class_count, references) + 2_500
 
 
 class TaskRateLimiter:
@@ -433,6 +499,7 @@ def finalize(
     *,
     image_count: int,
     class_count: int,
+    references: dict[int, tuple[box_ablation.ReferenceBox, ...]] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     modes: dict[str, Any] = {}
@@ -464,7 +531,10 @@ def finalize(
             "complete": complete,
             "task_count": len(tasks),
             "calls_per_image": class_count if condition.single_class else 1,
-            "reference_images_per_request": expected_images_per_request(condition, class_count) - 1,
+            "reference_images_per_request": expected_images_per_request(
+                condition, class_count, references
+            )
+            - 1,
             "statuses": statuses,
             "failure_types": failure_types,
             "prediction_count": len(predictions),
@@ -682,7 +752,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     condition_by_mode = {condition.mode: condition for condition in conditions}
     token_estimates = {
-        condition.mode: token_estimate(condition, len(categories))
+        condition.mode: token_estimate(condition, len(categories), references)
         for condition in conditions
     }
     reference_manifest = {
@@ -729,6 +799,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_directory,
             image_count=len(test["images"]),
             class_count=len(categories),
+            references=references,
         )
         return 0
 
@@ -850,6 +921,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_directory,
         image_count=len(test["images"]),
         class_count=len(categories),
+        references=references,
     )
     selected = summarize_records(tasks, output_directory)["total"]
     unresolved = selected["error"] + selected["pending"]

@@ -141,23 +141,23 @@ def select_reference_sequences(
         # Prefer one representative box per image when the dataset supports
         # it. RF20's K-shot definition is instance based, so datasets with
         # fewer than K distinct source images can explicitly opt into using
-        # all distinct annotated boxes, including multiple boxes from one
+        # all annotated boxes, including multiple boxes from one
         # source image.
+        best_by_image: dict[int, dict[str, Any]] = {}
+        for annotation in annotations_by_category[category_id]:
+            image_id = int(annotation["image_id"])
+            area = float(annotation["bbox"][2]) * float(annotation["bbox"][3])
+            current = best_by_image.get(image_id)
+            if current is None:
+                best_by_image[image_id] = annotation
+                continue
+            current_area = float(current["bbox"][2]) * float(current["bbox"][3])
+            if (area, -int(annotation["id"])) > (
+                current_area,
+                -int(current["id"]),
+            ):
+                best_by_image[image_id] = annotation
         if distinct_images_only:
-            best_by_image: dict[int, dict[str, Any]] = {}
-            for annotation in annotations_by_category[category_id]:
-                image_id = int(annotation["image_id"])
-                area = float(annotation["bbox"][2]) * float(annotation["bbox"][3])
-                current = best_by_image.get(image_id)
-                if current is None:
-                    best_by_image[image_id] = annotation
-                    continue
-                current_area = float(current["bbox"][2]) * float(current["bbox"][3])
-                if (area, -int(annotation["id"])) > (
-                    current_area,
-                    -int(current["id"]),
-                ):
-                    best_by_image[image_id] = annotation
             selected_annotations = list(best_by_image.values())
         else:
             selected_annotations = list(annotations_by_category[category_id])
@@ -196,8 +196,20 @@ def select_reference_sequences(
             )
         )
         selected = [candidates.pop(0)]
+        preferred_annotation_ids = {
+            int(annotation["id"]) for annotation in best_by_image.values()
+        }
         while len(selected) < required_count:
-            candidates.sort(
+            # Preserve the existing nested 1/2/5-shot sequence: exhaust one
+            # representative instance from every distinct image before adding
+            # further annotated instances from already-used images.
+            preferred = [
+                item
+                for item in candidates
+                if int(item["annotation"]["id"]) in preferred_annotation_ids
+            ]
+            pool = preferred or candidates
+            pool.sort(
                 key=lambda item: (
                     -min(
                         _squared_distance(item["feature"], chosen["feature"])
@@ -207,7 +219,9 @@ def select_reference_sequences(
                     int(item["annotation"]["id"]),
                 )
             )
-            selected.append(candidates.pop(0))
+            choice = pool[0]
+            candidates.remove(choice)
+            selected.append(choice)
 
         references = []
         for rank, item in enumerate(selected, start=1):

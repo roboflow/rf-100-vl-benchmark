@@ -8,6 +8,7 @@ import evaluate_qwen38_orion as base
 import evaluate_qwen38_recipe as recipe
 
 DATASET = Path("RF100VL/rf20-vl-fsod/the-dreidel-project")
+DEFECT = Path("RF100VL/rf20-vl-fsod-fresh-20260813/defect-detection")
 
 
 @pytest.fixture(scope="module")
@@ -105,6 +106,48 @@ def test_single_and_multi_task_counts(dataset):
         "multi",
     ]
     assert all(task.image_id == first_image_id for task in tasks[: len(first_image_tasks)])
+
+
+def test_ten_shot_groups_instances_that_share_a_reference_image(tmp_path):
+    train = base.load_coco(DEFECT / "train/_annotations.coco.json")
+    test = base.load_coco(DEFECT / "test/_annotations.coco.json")
+    categories = base.categories_by_id(test)
+    references = box_ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=10,
+        distinct_images_only=False,
+    )
+    assets = box_ablation.prepare_reference_assets(
+        DEFECT / "train", tmp_path / "references", references
+    )
+    condition = recipe.Condition(
+        "box10",
+        "multi",
+        "class_names",
+        "numeric_prediction",
+        10,
+        group_reference_instances_by_image=True,
+    )
+    task = make_task(condition.mode, "multi", test, categories)
+    content = recipe.build_messages(
+        task,
+        condition,
+        DEFECT / "test",
+        categories,
+        {},
+        references,
+        assets,
+    )[0]["content"]
+    reference_payloads = [
+        json.loads(part["text"])
+        for part in content
+        if part["type"] == "text" and part["text"].startswith('[{"bbox_2d"')
+    ]
+    assert sum(len(payload) for payload in reference_payloads) == 40
+    assert len(reference_payloads) == 34
+    assert any(len(payload) > 1 for payload in reference_payloads)
+    assert sum(part["type"] == "image_url" for part in content) == 35
 
 
 def test_labels_are_unique_and_semantic_names_are_hidden(dataset):

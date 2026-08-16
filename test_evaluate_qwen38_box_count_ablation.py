@@ -8,6 +8,7 @@ import evaluate_qwen38_orion as base
 
 DATASET = Path("RF100VL/rf20-vl-fsod/the-dreidel-project")
 ORION = Path("RF100VL/rf20-vl-fsod/orionproducts")
+DEFECT = Path("RF100VL/rf20-vl-fsod-fresh-20260813/defect-detection")
 
 
 @pytest.fixture(scope="module")
@@ -79,6 +80,23 @@ def test_instance_based_reference_selection_supports_orion_ten_shot():
         len({reference.image_id for reference in sequence}) < 10
         for sequence in references.values()
     )
+
+
+def test_instance_based_selection_preserves_distinct_image_prefix():
+    train = base.load_coco(DEFECT / "train/_annotations.coco.json")
+    distinct = ablation.select_reference_sequences(
+        train, DEFECT / "train", required_count=5
+    )
+    instances = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=10,
+        distinct_images_only=False,
+    )
+    for category_id in distinct:
+        assert instances[category_id][:5] == distinct[category_id]
+        assert len({item.annotation_id for item in instances[category_id]}) == 10
+    assert len({item.image_id for item in instances[1]}) == 6
 
 
 def test_condition_and_task_matrix_is_complete_and_unique(dataset):

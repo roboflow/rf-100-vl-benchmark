@@ -1,0 +1,7 @@
+{
+  "conditions": [
+    {"mode":"box_b10_repeat_01","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":10,"reasoning_effort":"none","seed":1234,"group_reference_instances_by_image":true},
+    {"mode":"box_b10_repeat_02","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":10,"reasoning_effort":"none","seed":1234,"group_reference_instances_by_image":true},
+    {"mode":"box_b10_repeat_03","formulation":"multi","semantics":"class_names","representation":"numeric_prediction","box_count":10,"reasoning_effort":"none","seed":1234,"group_reference_instances_by_image":true}
+  ]
+}
