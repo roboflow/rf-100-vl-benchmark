@@ -303,12 +303,58 @@ def test_detection_reference_and_output_examples_share_one_serializer():
     )
 
 
+def test_explicit_sparse_condition_changes_only_reference_semantics(dataset):
+    test, categories, references, assets, _ = dataset
+    implicit = recipe.Condition(
+        "implicit", "multi", "class_names", "numeric_prediction", 2
+    )
+    explicit = recipe.Condition(
+        "explicit",
+        "multi",
+        "class_names",
+        "numeric_prediction",
+        2,
+        explicit_sparse_references=True,
+    )
+    implicit_task = make_task(implicit.mode, "multi", test, categories)
+    explicit_task = make_task(explicit.mode, "multi", test, categories)
+    implicit_content = recipe.build_messages(
+        implicit_task,
+        implicit,
+        DATASET / "test",
+        categories,
+        {},
+        references,
+        assets,
+    )[0]["content"]
+    explicit_content = recipe.build_messages(
+        explicit_task,
+        explicit,
+        DATASET / "test",
+        categories,
+        {},
+        references,
+        assets,
+    )[0]["content"]
+    assert implicit_content[1:] == explicit_content[1:]
+    sparse_clause = (
+        "The marked boxes are sparse positive exemplars. Treat all unmarked "
+        "objects and regions in reference images as unlabeled, not as negative "
+        "examples or exhaustive annotations."
+    )
+    assert sparse_clause not in implicit_content[0]["text"]
+    assert sparse_clause in explicit_content[0]["text"]
+    assert "explicit_sparse_references" not in recipe.condition_payload(implicit)
+    assert recipe.condition_payload(explicit)["explicit_sparse_references"] is True
+
+
 @pytest.mark.parametrize(
     "value",
     [
         {"mode": "bad", "formulation": "bad", "semantics": "class_names", "representation": "none", "box_count": 0},
         {"mode": "bad", "formulation": "multi", "semantics": "anonymous_explicit", "representation": "none", "box_count": 0},
         {"mode": "bad", "formulation": "multi", "semantics": "self_name_only", "representation": "drawn", "box_count": 1},
+        {"mode": "bad", "formulation": "multi", "semantics": "class_names", "representation": "none", "box_count": 0, "explicit_sparse_references": True},
     ],
 )
 def test_invalid_conditions_are_rejected(tmp_path, value):

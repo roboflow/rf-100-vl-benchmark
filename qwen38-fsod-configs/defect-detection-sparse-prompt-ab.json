@@ -1,0 +1,23 @@
+{
+  "conditions": [
+    {
+      "mode": "implicit_positive_b05",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 5,
+      "reasoning_effort": "none",
+      "seed": 1234
+    },
+    {
+      "mode": "explicit_sparse_b05",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 5,
+      "reasoning_effort": "none",
+      "seed": 1234,
+      "explicit_sparse_references": true
+    }
+  ]
+}

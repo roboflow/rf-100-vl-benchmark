@@ -72,6 +72,7 @@ class Condition:
     reasoning_effort: str = "none"
     seed: int = 1234
     group_reference_instances_by_image: bool = False
+    explicit_sparse_references: bool = False
 
     @property
     def single_class(self) -> bool:
@@ -111,6 +112,10 @@ def load_conditions(path: Path) -> tuple[Condition, ...]:
             raise ValueError(f"Anonymous condition {condition.mode} needs references.")
         if condition.semantics == "self_name_only" and condition.uses_references:
             raise ValueError(f"self_name_only condition {condition.mode} cannot attach references.")
+        if condition.explicit_sparse_references and not condition.uses_references:
+            raise ValueError(
+                f"Explicit sparse-reference semantics in {condition.mode} require references."
+            )
         if (
             condition.group_reference_instances_by_image
             and condition.representation not in {"numeric", "numeric_prediction"}
@@ -119,6 +124,15 @@ def load_conditions(path: Path) -> tuple[Condition, ...]:
                 f"Grouped reference instances in {condition.mode} require a numeric representation."
             )
     return conditions
+
+
+def condition_payload(condition: Condition) -> dict[str, Any]:
+    """Serialize conditions without changing legacy default manifests."""
+
+    payload = asdict(condition)
+    if not payload["explicit_sparse_references"]:
+        payload.pop("explicit_sparse_references")
+    return payload
 
 
 def concept_identifier(index: int) -> str:
@@ -367,6 +381,12 @@ def build_messages(
                 f" Use the {condition.box_count} positive reference box"
                 f"{'es' if condition.box_count != 1 else ''} supplied per label."
             )
+            if condition.explicit_sparse_references:
+                prompt += (
+                    " The marked boxes are sparse positive exemplars. Treat all "
+                    "unmarked objects and regions in reference images as unlabeled, "
+                    "not as negative examples or exhaustive annotations."
+                )
         prompt += " " + _output_contract(requested_labels)
         content.append({"type": "text", "text": prompt})
 
@@ -527,7 +547,7 @@ def finalize(
             if failure_type:
                 failure_types[str(failure_type)] = failure_types.get(str(failure_type), 0) + 1
         summary = {
-            "condition": asdict(condition),
+            "condition": condition_payload(condition),
             "complete": complete,
             "task_count": len(tasks),
             "calls_per_image": class_count if condition.single_class else 1,
@@ -771,7 +791,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "train_annotation_sha256": base.sha256_file(train_path),
         "test_annotation_sha256": base.sha256_file(test_path),
         "selected_test_image_ids": selected_image_ids,
-        "conditions": [asdict(condition) for condition in conditions],
+        "conditions": [condition_payload(condition) for condition in conditions],
         "common_settings": common_settings,
         "self_names": self_names,
         "self_names_sha256": base.sha256_file(args.self_names_json.resolve()) if args.self_names_json else None,
