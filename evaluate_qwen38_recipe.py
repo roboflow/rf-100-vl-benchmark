@@ -29,7 +29,7 @@ import evaluate_qwen38_exemplar_only_ablation as exemplar
 import evaluate_qwen38_orion as base
 
 MODEL_ID = "qwen3.8-max"
-PROMPT_VERSION = "qwen3.8-max-configurable-fsod-recipe-v3"
+PROMPT_VERSION = "qwen3.8-max-configurable-fsod-recipe-v4"
 FORMULATIONS = {"single", "multi"}
 SEMANTICS = {
     "class_names",
@@ -40,7 +40,7 @@ SEMANTICS = {
 }
 REPRESENTATIONS = {"none", "numeric", "numeric_prediction", "drawn"}
 REASONING_EFFORTS = {"none", "low", "medium"}
-INSTRUCTION_MODES = {"none", "correct", "permuted"}
+INSTRUCTION_MODES = {"none", "correct", "permuted", "strict_permuted"}
 TERMINAL_STATUSES = base.TERMINAL_STATUSES
 
 LOGGER = logging.getLogger("qwen38_recipe")
@@ -155,6 +155,9 @@ def condition_payload(condition: Condition) -> dict[str, Any]:
 
 _OBJECT_CLASSES_HEADING = re.compile(r"(?m)^# Object Classes\s*$")
 _CLASS_SECTION_HEADING = re.compile(r"(?m)^## (?!#)(.+?)\s*$")
+_DEFINITION_BULLET = re.compile(
+    r"(?m)^(\s*-\s+\*\*[^*\n]+?\*\*:?\s*)([^\n]+)$"
+)
 
 
 def permute_class_instruction_sections(readme: str) -> str:
@@ -193,6 +196,36 @@ def permute_class_instruction_sections(readme: str) -> str:
     return result
 
 
+def permute_all_class_guidance(readme: str) -> str:
+    """Also rotate introduction definitions for a stricter semantic control."""
+
+    detailed = permute_class_instruction_sections(readme)
+    object_match = _OBJECT_CLASSES_HEADING.search(detailed)
+    if object_match is None:
+        raise AssertionError("Object-class section disappeared during permutation.")
+    prefix = detailed[: object_match.start()]
+    suffix = detailed[object_match.start() :]
+    matches = list(_DEFINITION_BULLET.finditer(prefix))
+    if len(matches) < 2:
+        raise ValueError("Strictly permuted instructions require two definition bullets.")
+    definitions = [match.group(2) for match in matches]
+    rotated = definitions[1:] + definitions[:1]
+    parts = []
+    cursor = 0
+    for match, definition in zip(matches, rotated, strict=True):
+        parts.append(prefix[cursor : match.start()])
+        parts.append(match.group(1))
+        parts.append(definition)
+        cursor = match.end()
+    parts.append(prefix[cursor:])
+    result = "".join(parts) + suffix
+    if sorted(re.findall(r"\S+", result)) != sorted(re.findall(r"\S+", readme)):
+        raise AssertionError("Strict instruction permutation changed README token content.")
+    if result == detailed or result == readme:
+        raise AssertionError("Strict instruction permutation did not alter both guide levels.")
+    return result
+
+
 def instruction_text(condition: Condition, readme: str | None) -> str | None:
     if condition.instruction_mode == "none":
         return None
@@ -202,6 +235,8 @@ def instruction_text(condition: Condition, readme: str | None) -> str | None:
         return readme
     if condition.instruction_mode == "permuted":
         return permute_class_instruction_sections(readme)
+    if condition.instruction_mode == "strict_permuted":
+        return permute_all_class_guidance(readme)
     raise AssertionError(condition.instruction_mode)
 
 

@@ -437,6 +437,18 @@ def test_permuted_instructions_preserve_content_but_break_section_mapping(datase
     assert permuted_first != original_first
 
 
+def test_strict_permutation_also_breaks_introduction_definition_mapping(dataset):
+    readme = (DATASET / "README.dataset.txt").read_text(encoding="utf-8").strip()
+    detailed_only = recipe.permute_class_instruction_sections(readme)
+    strict = recipe.permute_all_class_guidance(readme)
+    assert strict != detailed_only
+    assert strict != readme
+    assert sorted(strict.split()) == sorted(readme.split())
+    original_definition = readme.split("- **Dreidel**:", 1)[1].splitlines()[0]
+    strict_definition = strict.split("- **Dreidel**:", 1)[1].splitlines()[0]
+    assert strict_definition != original_definition
+
+
 def test_instruction_modes_are_validated_and_manifested(tmp_path):
     path = tmp_path / "conditions.json"
     path.write_text(
