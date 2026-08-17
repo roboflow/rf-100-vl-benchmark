@@ -8,6 +8,7 @@ CONDITIONS=${CONDITIONS:-qwen38-fsod-configs/rf20-all-available-explicit-sparse.
 MAX_PASSES=${MAX_PASSES:-6}
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
 SMOKE_ONLY=${SMOKE_ONLY:-0}
+PRIORITY_DATASET=${PRIORITY_DATASET:-}
 SMOKE_ROOT=$RUN_ROOT/_smoke-paper-parts-image-0
 COMMON=(
   --concurrency 256
@@ -25,6 +26,23 @@ if [[ ${#datasets[@]} -ne 20 ]]; then
   echo "RF20-VL-FSOD requires exactly 20 dataset directories; found ${#datasets[@]}." >&2
   exit 1
 fi
+if [[ -n "$PRIORITY_DATASET" ]]; then
+  found_priority=0
+  reordered=("$PRIORITY_DATASET")
+  for dataset in "${datasets[@]}"; do
+    if [[ "$dataset" == "$PRIORITY_DATASET" ]]; then
+      found_priority=1
+    else
+      reordered+=("$dataset")
+    fi
+  done
+  if [[ $found_priority -ne 1 ]]; then
+    echo "Unknown priority dataset: $PRIORITY_DATASET" >&2
+    exit 1
+  fi
+  datasets=("${reordered[@]}")
+fi
+echo "Dataset queue: ${datasets[*]}"
 
 mkdir -p "$RUN_ROOT"
 "$UV_BIN" run --with-requirements requirements-cosmos.txt \
