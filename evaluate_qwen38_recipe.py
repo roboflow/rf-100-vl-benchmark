@@ -29,7 +29,7 @@ import evaluate_qwen38_exemplar_only_ablation as exemplar
 import evaluate_qwen38_orion as base
 
 MODEL_ID = "qwen3.8-max"
-PROMPT_VERSION = "qwen3.8-max-configurable-fsod-recipe-v2"
+PROMPT_VERSION = "qwen3.8-max-configurable-fsod-recipe-v3"
 FORMULATIONS = {"single", "multi"}
 SEMANTICS = {
     "class_names",
@@ -435,41 +435,51 @@ def build_messages(
     else:
         if condition.single_class:
             if condition.semantics == "anonymous_explicit":
-                prompt = exemplar.EXPLICIT_PROMPT
+                task_prompt = exemplar.EXPLICIT_PROMPT
             else:
-                prompt = f'Detect every instance of "{requested_labels[0]}" in the TARGET IMAGE.'
+                task_prompt = f'Detect every instance of "{requested_labels[0]}" in the TARGET IMAGE.'
         else:
             if condition.semantics == "anonymous_explicit":
-                prompt = (
+                task_prompt = (
                     "Each reference group defines an anonymous visual concept. Find every "
                     "object in the TARGET IMAGE that is the same kind as a marked object, "
                     "and assign its reference-group label."
                 )
             else:
-                prompt = "Detect every instance of the listed labels in the TARGET IMAGE."
+                task_prompt = "Detect every instance of the listed labels in the TARGET IMAGE."
         if condition.uses_references:
             if condition.all_available_references:
-                prompt += " Use all positive reference boxes supplied for each label."
+                task_prompt += " Use all positive reference boxes supplied for each label."
             else:
-                prompt += (
+                task_prompt += (
                     f" Use the {condition.box_count} positive reference box"
                     f"{'es' if condition.box_count != 1 else ''} supplied per label."
                 )
             if condition.explicit_sparse_references:
-                prompt += (
+                task_prompt += (
                     " The marked boxes are sparse positive exemplars. Treat all "
                     "unmarked objects and regions in reference images as unlabeled, "
                     "not as negative examples or exhaustive annotations."
                 )
         guide = instruction_text(condition, readme)
         if guide:
-            prompt += (
-                " Follow the dataset's annotator guide below when deciding what to "
+            prompt = (
+                "Use the dataset's annotator guide as context for deciding what to "
                 "detect and how to localize it.\n\n"
                 "DATASET ANNOTATOR GUIDE:\n"
-                f"{guide}"
+                f"{guide}\n"
+                "END DATASET ANNOTATOR GUIDE.\n\n"
+                "FINAL DETECTION REQUEST:\n"
+                f"{task_prompt}"
             )
+        else:
+            prompt = task_prompt
         prompt += " " + _output_contract(requested_labels)
+        if guide:
+            prompt += (
+                " Your entire response must be the JSON list. Do not explain, "
+                "restate the guide, or describe the detected objects in prose."
+            )
         content.append({"type": "text", "text": prompt})
 
     if condition.uses_references:

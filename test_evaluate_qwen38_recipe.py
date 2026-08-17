@@ -412,6 +412,12 @@ def test_correct_instructions_append_the_exact_dataset_readme(dataset):
         readme,
     )[0]["content"]
     assert f"DATASET ANNOTATOR GUIDE:\n{readme}" in content[0]["text"]
+    assert content[0]["text"].index("END DATASET ANNOTATOR GUIDE") < content[0]["text"].index(
+        "FINAL DETECTION REQUEST"
+    )
+    assert content[0]["text"].endswith(
+        "Do not explain, restate the guide, or describe the detected objects in prose."
+    )
     assert content[-2] == {"type": "text", "text": "TARGET IMAGE:"}
     assert content[-1]["type"] == "image_url"
 
