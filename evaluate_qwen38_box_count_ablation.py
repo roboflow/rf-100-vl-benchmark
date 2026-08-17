@@ -14,6 +14,7 @@ import argparse
 import concurrent.futures
 import csv
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -117,12 +118,15 @@ def select_reference_sequences(
     required_count: int = max(BOX_COUNTS),
     distinct_images_only: bool = True,
     first_strategy: str = "largest-relative-area",
+    random_seed: int = 1234,
 ) -> dict[int, tuple[ReferenceBox, ...]]:
     """Select nested, diverse, train-only reference boxes.
 
     Rank one defaults to the existing experiment's largest-relative-area rule.
     A median-relative-area first reference is available for controlled selector
-    sensitivity experiments.
+    sensitivity experiments. ``largest-then-seeded-random`` preserves the
+    established rank-one reference and orders all remaining object annotations
+    by a stable seeded hash, producing a uniform, immutable nested sample.
     Remaining ranks use deterministic farthest-point sampling over object-crop
     pixels. By default, each box comes from a distinct image; instance-based
     FSOD datasets can explicitly allow shared source images. The ordering never
@@ -191,7 +195,10 @@ def select_reference_sequences(
                 }
             )
 
-        if first_strategy == "largest-relative-area":
+        if first_strategy in {
+            "largest-relative-area",
+            "largest-then-seeded-random",
+        }:
             candidates.sort(
                 key=lambda item: (
                     -item["relative_area"],
@@ -200,6 +207,18 @@ def select_reference_sequences(
                 )
             )
             selected = [candidates.pop(0)]
+            if first_strategy == "largest-then-seeded-random":
+                dataset_name = train_directory.parent.name
+                candidates.sort(
+                    key=lambda item: hashlib.sha256(
+                        (
+                            f"{random_seed}\0{dataset_name}\0{category_id}\0"
+                            f"{int(item['annotation']['id'])}"
+                        ).encode("utf-8")
+                    ).digest()
+                )
+                selected.extend(candidates[: required_count - 1])
+                del candidates[: required_count - 1]
         elif first_strategy == "median-relative-area":
             candidates.sort(
                 key=lambda item: (

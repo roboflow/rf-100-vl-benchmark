@@ -137,6 +137,49 @@ def test_median_relative_area_strategy_changes_only_first_reference_rule():
         assert median[category_id][0] != largest[category_id][0]
 
 
+def test_largest_then_seeded_random_is_nested_reproducible_and_object_based():
+    train = base.load_coco(DEFECT / "train/_annotations.coco.json")
+    first = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=5,
+        distinct_images_only=False,
+        first_strategy="largest-then-seeded-random",
+        random_seed=1234,
+    )
+    second = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=10,
+        distinct_images_only=False,
+        first_strategy="largest-then-seeded-random",
+        random_seed=1234,
+    )
+    largest = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=1,
+        distinct_images_only=False,
+    )
+    alternative_seed = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=5,
+        distinct_images_only=False,
+        first_strategy="largest-then-seeded-random",
+        random_seed=5678,
+    )
+    for category_id in first:
+        assert first[category_id] == second[category_id][:5]
+        assert first[category_id][0] == largest[category_id][0]
+        assert len({item.annotation_id for item in first[category_id]}) == 5
+        assert alternative_seed[category_id][0] == first[category_id][0]
+    assert any(
+        alternative_seed[category_id][1:] != first[category_id][1:]
+        for category_id in first
+    )
+
+
 def test_condition_and_task_matrix_is_complete_and_unique(dataset):
     _, test, categories, _, _ = dataset
     assert len(ablation.CONDITIONS) == 22

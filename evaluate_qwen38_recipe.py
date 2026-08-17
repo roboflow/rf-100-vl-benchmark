@@ -666,9 +666,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-shared-reference-images", action="store_true")
     parser.add_argument(
         "--reference-first-strategy",
-        choices=("largest-relative-area", "median-relative-area"),
+        choices=(
+            "largest-relative-area",
+            "median-relative-area",
+            "largest-then-seeded-random",
+        ),
         default="largest-relative-area",
         help="Train-only rule for selecting the first positive object per class.",
+    )
+    parser.add_argument(
+        "--reference-random-seed",
+        type=int,
+        default=1234,
+        help="Stable seed used by seeded-random reference selection.",
     )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
@@ -760,6 +770,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             required_count=max_boxes,
             distinct_images_only=not args.allow_shared_reference_images,
             first_strategy=args.reference_first_strategy,
+            random_seed=args.reference_random_seed,
         )
         assets = box_ablation.prepare_reference_assets(
             train_directory, output_directory / "references", references
@@ -806,11 +817,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             "method": (
                 "largest-relative-area-then-greedy-crop-diversity-v1"
                 if args.reference_first_strategy == "largest-relative-area"
-                else "median-relative-area-then-greedy-crop-diversity-v1"
+                else (
+                    "median-relative-area-then-greedy-crop-diversity-v1"
+                    if args.reference_first_strategy == "median-relative-area"
+                    else "largest-relative-area-then-seeded-random-object-order-v1"
+                )
             ),
             **(
                 {"first_reference_strategy": args.reference_first_strategy}
                 if args.reference_first_strategy != "largest-relative-area"
+                else {}
+            ),
+            **(
+                {"random_seed": args.reference_random_seed}
+                if args.reference_first_strategy == "largest-then-seeded-random"
                 else {}
             ),
             "one_box_per_distinct_train_image": not args.allow_shared_reference_images,
