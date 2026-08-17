@@ -163,7 +163,10 @@ def visualize_predictions(image_path, boxes, input_width, input_height,
         label_text = box.get("label", "unknown")
         
         category_id = None
-        for cat_id, cat_name in categories_dict.items():
+        # Try the most specific (longest) category name first so nested names
+        # do not collide (e.g. a predicted "jellyfish" must not match "fish").
+        for cat_id, cat_name in sorted(categories_dict.items(),
+                                       key=lambda kv: -len(kv[1])):
             if cat_name.lower() in label_text.lower():
                 category_id = cat_id
                 break
