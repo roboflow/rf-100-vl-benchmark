@@ -73,6 +73,7 @@ class Condition:
     seed: int = 1234
     group_reference_instances_by_image: bool = False
     explicit_sparse_references: bool = False
+    all_available_references: bool = False
 
     @property
     def single_class(self) -> bool:
@@ -116,6 +117,10 @@ def load_conditions(path: Path) -> tuple[Condition, ...]:
             raise ValueError(
                 f"Explicit sparse-reference semantics in {condition.mode} require references."
             )
+        if condition.all_available_references and condition.box_count != 10:
+            raise ValueError(
+                f"All-available condition {condition.mode} must use box_count=10."
+            )
         if (
             condition.group_reference_instances_by_image
             and condition.representation not in {"numeric", "numeric_prediction"}
@@ -132,6 +137,8 @@ def condition_payload(condition: Condition) -> dict[str, Any]:
     payload = asdict(condition)
     if not payload["explicit_sparse_references"]:
         payload.pop("explicit_sparse_references")
+    if not payload["all_available_references"]:
+        payload.pop("all_available_references")
     return payload
 
 
@@ -377,10 +384,13 @@ def build_messages(
             else:
                 prompt = "Detect every instance of the listed labels in the TARGET IMAGE."
         if condition.uses_references:
-            prompt += (
-                f" Use the {condition.box_count} positive reference box"
-                f"{'es' if condition.box_count != 1 else ''} supplied per label."
-            )
+            if condition.all_available_references:
+                prompt += " Use all positive reference boxes supplied for each label."
+            else:
+                prompt += (
+                    f" Use the {condition.box_count} positive reference box"
+                    f"{'es' if condition.box_count != 1 else ''} supplied per label."
+                )
             if condition.explicit_sparse_references:
                 prompt += (
                     " The marked boxes are sparse positive exemplars. Treat all "
@@ -771,6 +781,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             distinct_images_only=not args.allow_shared_reference_images,
             first_strategy=args.reference_first_strategy,
             random_seed=args.reference_random_seed,
+            allow_fewer=any(
+                condition.all_available_references for condition in conditions
+            ),
         )
         assets = box_ablation.prepare_reference_assets(
             train_directory, output_directory / "references", references

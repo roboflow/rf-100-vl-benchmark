@@ -119,6 +119,7 @@ def select_reference_sequences(
     distinct_images_only: bool = True,
     first_strategy: str = "largest-relative-area",
     random_seed: int = 1234,
+    allow_fewer: bool = False,
 ) -> dict[int, tuple[ReferenceBox, ...]]:
     """Select nested, diverse, train-only reference boxes.
 
@@ -168,10 +169,15 @@ def select_reference_sequences(
             selected_annotations = list(best_by_image.values())
         else:
             selected_annotations = list(annotations_by_category[category_id])
-        if len(selected_annotations) < required_count:
+        target_count = (
+            min(required_count, len(selected_annotations))
+            if allow_fewer
+            else required_count
+        )
+        if len(selected_annotations) < target_count:
             raise ValueError(
                 f"{category_name!r} has {len(selected_annotations)} eligible "
-                f"positive train boxes; {required_count} are required."
+                f"positive train boxes; {target_count} are required."
             )
 
         candidates: list[dict[str, Any]] = []
@@ -217,8 +223,8 @@ def select_reference_sequences(
                         ).encode("utf-8")
                     ).digest()
                 )
-                selected.extend(candidates[: required_count - 1])
-                del candidates[: required_count - 1]
+                selected.extend(candidates[: target_count - 1])
+                del candidates[: target_count - 1]
         elif first_strategy == "median-relative-area":
             candidates.sort(
                 key=lambda item: (
@@ -233,7 +239,7 @@ def select_reference_sequences(
         preferred_annotation_ids = {
             int(annotation["id"]) for annotation in best_by_image.values()
         }
-        while len(selected) < required_count:
+        while len(selected) < target_count:
             # Preserve the existing nested 1/2/5-shot sequence: exhaust one
             # representative instance from every distinct image before adding
             # further annotated instances from already-used images.

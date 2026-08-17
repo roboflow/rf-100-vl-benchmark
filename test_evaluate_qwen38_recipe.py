@@ -150,6 +150,51 @@ def test_ten_shot_groups_instances_that_share_a_reference_image(tmp_path):
     assert sum(part["type"] == "image_url" for part in content) == 35
 
 
+def test_all_available_condition_includes_every_official_train_annotation(tmp_path):
+    dataset = Path("RF100VL/rf20-vl-fsod-fresh-20260813/all-elements")
+    train = base.load_coco(dataset / "train/_annotations.coco.json")
+    test = base.load_coco(dataset / "test/_annotations.coco.json")
+    categories = base.categories_by_id(test)
+    references = box_ablation.select_reference_sequences(
+        train,
+        dataset / "train",
+        required_count=10,
+        distinct_images_only=False,
+        allow_fewer=True,
+    )
+    assets = box_ablation.prepare_reference_assets(
+        dataset / "train", tmp_path / "references", references
+    )
+    condition = recipe.Condition(
+        "all_available",
+        "multi",
+        "class_names",
+        "numeric_prediction",
+        10,
+        group_reference_instances_by_image=True,
+        explicit_sparse_references=True,
+        all_available_references=True,
+    )
+    task = make_task(condition.mode, "multi", test, categories)
+    content = recipe.build_messages(
+        task,
+        condition,
+        dataset / "test",
+        categories,
+        {},
+        references,
+        assets,
+    )[0]["content"]
+    assert "Use all positive reference boxes supplied for each label." in content[0]["text"]
+    assert "10 positive reference" not in content[0]["text"]
+    payloads = [
+        json.loads(part["text"])
+        for part in content
+        if part["type"] == "text" and part["text"].startswith('[{"bbox_2d"')
+    ]
+    assert sum(map(len, payloads)) == len(train["annotations"])
+
+
 def test_labels_are_unique_and_semantic_names_are_hidden(dataset):
     _, categories, _, _, self_names = dataset
     anonymous = recipe.Condition(
