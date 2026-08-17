@@ -1,0 +1,13 @@
+{
+  "conditions": [
+    {
+      "mode": "numeric_prediction_b01_multi_median_area",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 1,
+      "reasoning_effort": "none",
+      "seed": 1234
+    }
+  ]
+}

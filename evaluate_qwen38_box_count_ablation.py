@@ -116,10 +116,13 @@ def select_reference_sequences(
     *,
     required_count: int = max(BOX_COUNTS),
     distinct_images_only: bool = True,
+    first_strategy: str = "largest-relative-area",
 ) -> dict[int, tuple[ReferenceBox, ...]]:
     """Select nested, diverse, train-only reference boxes.
 
-    Rank one matches the existing experiment's largest-relative-area rule.
+    Rank one defaults to the existing experiment's largest-relative-area rule.
+    A median-relative-area first reference is available for controlled selector
+    sensitivity experiments.
     Remaining ranks use deterministic farthest-point sampling over object-crop
     pixels. By default, each box comes from a distinct image; instance-based
     FSOD datasets can explicitly allow shared source images. The ordering never
@@ -188,14 +191,26 @@ def select_reference_sequences(
                 }
             )
 
-        candidates.sort(
-            key=lambda item: (
-                -item["relative_area"],
-                str(item["image"]["file_name"]),
-                int(item["annotation"]["id"]),
+        if first_strategy == "largest-relative-area":
+            candidates.sort(
+                key=lambda item: (
+                    -item["relative_area"],
+                    str(item["image"]["file_name"]),
+                    int(item["annotation"]["id"]),
+                )
             )
-        )
-        selected = [candidates.pop(0)]
+            selected = [candidates.pop(0)]
+        elif first_strategy == "median-relative-area":
+            candidates.sort(
+                key=lambda item: (
+                    item["relative_area"],
+                    str(item["image"]["file_name"]),
+                    int(item["annotation"]["id"]),
+                )
+            )
+            selected = [candidates.pop((len(candidates) - 1) // 2)]
+        else:
+            raise ValueError(f"Unknown first-reference strategy: {first_strategy}")
         preferred_annotation_ids = {
             int(annotation["id"]) for annotation in best_by_image.values()
         }

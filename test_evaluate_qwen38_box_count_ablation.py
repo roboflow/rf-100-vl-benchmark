@@ -99,6 +99,44 @@ def test_instance_based_selection_preserves_distinct_image_prefix():
     assert len({item.image_id for item in instances[1]}) == 6
 
 
+def test_median_relative_area_strategy_changes_only_first_reference_rule():
+    train = base.load_coco(DEFECT / "train/_annotations.coco.json")
+    largest = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=1,
+        distinct_images_only=False,
+    )
+    median = ablation.select_reference_sequences(
+        train,
+        DEFECT / "train",
+        required_count=1,
+        distinct_images_only=False,
+        first_strategy="median-relative-area",
+    )
+    images = {int(image["id"]): image for image in train["images"]}
+    annotations = {}
+    for annotation in train["annotations"]:
+        annotations.setdefault(int(annotation["category_id"]), []).append(annotation)
+    for category_id, values in annotations.items():
+        ordered = sorted(
+            values,
+            key=lambda annotation: (
+                float(annotation["bbox"][2])
+                * float(annotation["bbox"][3])
+                / (
+                    int(images[int(annotation["image_id"])]["width"])
+                    * int(images[int(annotation["image_id"])]["height"])
+                ),
+                str(images[int(annotation["image_id"])]["file_name"]),
+                int(annotation["id"]),
+            ),
+        )
+        expected = int(ordered[(len(ordered) - 1) // 2]["id"])
+        assert median[category_id][0].annotation_id == expected
+        assert median[category_id][0] != largest[category_id][0]
+
+
 def test_condition_and_task_matrix_is_complete_and_unique(dataset):
     _, test, categories, _, _ = dataset
     assert len(ablation.CONDITIONS) == 22

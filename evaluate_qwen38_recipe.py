@@ -664,6 +664,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--image-ids", nargs="+", type=int)
     parser.add_argument("--limit-per-mode", type=int)
     parser.add_argument("--allow-shared-reference-images", action="store_true")
+    parser.add_argument(
+        "--reference-first-strategy",
+        choices=("largest-relative-area", "median-relative-area"),
+        default="largest-relative-area",
+        help="Train-only rule for selecting the first positive object per class.",
+    )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
         "--retry-terminal-provider-failures",
@@ -753,6 +759,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             train_directory,
             required_count=max_boxes,
             distinct_images_only=not args.allow_shared_reference_images,
+            first_strategy=args.reference_first_strategy,
         )
         assets = box_ablation.prepare_reference_assets(
             train_directory, output_directory / "references", references
@@ -796,7 +803,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "self_names": self_names,
         "self_names_sha256": base.sha256_file(args.self_names_json.resolve()) if args.self_names_json else None,
         "reference_selection": {
-            "method": "largest-relative-area-then-greedy-crop-diversity-v1",
+            "method": (
+                "largest-relative-area-then-greedy-crop-diversity-v1"
+                if args.reference_first_strategy == "largest-relative-area"
+                else "median-relative-area-then-greedy-crop-diversity-v1"
+            ),
+            **(
+                {"first_reference_strategy": args.reference_first_strategy}
+                if args.reference_first_strategy != "largest-relative-area"
+                else {}
+            ),
             "one_box_per_distinct_train_image": not args.allow_shared_reference_images,
             "classes": reference_manifest,
         },
