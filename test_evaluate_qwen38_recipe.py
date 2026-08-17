@@ -393,6 +393,69 @@ def test_explicit_sparse_condition_changes_only_reference_semantics(dataset):
     assert recipe.condition_payload(explicit)["explicit_sparse_references"] is True
 
 
+def test_correct_instructions_append_the_exact_dataset_readme(dataset):
+    test, categories, references, assets, _ = dataset
+    readme = (DATASET / "README.dataset.txt").read_text(encoding="utf-8").strip()
+    condition = recipe.Condition(
+        "instructions", "multi", "class_names", "none", 0,
+        instruction_mode="correct",
+    )
+    task = make_task(condition.mode, "multi", test, categories)
+    content = recipe.build_messages(
+        task,
+        condition,
+        DATASET / "test",
+        categories,
+        {},
+        references,
+        assets,
+        readme,
+    )[0]["content"]
+    assert f"DATASET ANNOTATOR GUIDE:\n{readme}" in content[0]["text"]
+    assert content[-2] == {"type": "text", "text": "TARGET IMAGE:"}
+    assert content[-1]["type"] == "image_url"
+
+
+def test_permuted_instructions_preserve_content_but_break_section_mapping(dataset):
+    readme = (DATASET / "README.dataset.txt").read_text(encoding="utf-8").strip()
+    permuted = recipe.permute_class_instruction_sections(readme)
+    assert permuted != readme
+    assert sorted(permuted.split()) == sorted(readme.split())
+    assert permuted[: permuted.index("# Object Classes") + len("# Object Classes")] == (
+        readme[: readme.index("# Object Classes") + len("# Object Classes")]
+    )
+    original_first = readme.split("## Dreidel", 1)[1].split("## Gimel", 1)[0]
+    permuted_first = permuted.split("## Dreidel", 1)[1].split("## Gimel", 1)[0]
+    original_second = readme.split("## Gimel", 1)[1].split("## Hay", 1)[0]
+    assert permuted_first == original_second
+    assert permuted_first != original_first
+
+
+def test_instruction_modes_are_validated_and_manifested(tmp_path):
+    path = tmp_path / "conditions.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "mode": "correct",
+                    "formulation": "multi",
+                    "semantics": "class_names",
+                    "representation": "none",
+                    "box_count": 0,
+                    "instruction_mode": "correct",
+                }
+            ]
+        )
+    )
+    condition = recipe.load_conditions(path)[0]
+    assert recipe.condition_payload(condition)["instruction_mode"] == "correct"
+    invalid = json.loads(path.read_text())
+    invalid[0]["instruction_mode"] = "unknown"
+    path.write_text(json.dumps(invalid))
+    with pytest.raises(ValueError):
+        recipe.load_conditions(path)
+
+
 @pytest.mark.parametrize(
     "value",
     [

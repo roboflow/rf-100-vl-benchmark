@@ -1,0 +1,153 @@
+{
+  "version": "rf20-label-sufficiency-v1",
+  "locked_at": "2026-08-17T21:21:57Z",
+  "score_blind": true,
+  "rubric": {
+    "name_alone_insufficient": "The class name alone does not unambiguously identify the visual target or dataset-specific meaning.",
+    "requires_state_role_or_context": "Detection depends on state, role, relationship, absence, or scene context rather than object identity alone.",
+    "requires_special_boundary_rule": "The annotated box is a part, region, absence, diffuse extent, or otherwise requires a non-obvious boundary convention.",
+    "unusual_visual_domain": "The imagery or visual vocabulary is specialized relative to ordinary natural-image recognition."
+  },
+  "datasets": {
+    "actions": {
+      "classes": ["Attack", "Block", "Defense", "Serve", "Set", "ball"],
+      "name_alone_insufficient": ["Attack", "Block", "Defense", "Serve", "Set"],
+      "requires_state_role_or_context": ["Attack", "Block", "Defense", "Serve", "Set"],
+      "requires_special_boundary_rule": ["Attack", "Block", "Defense", "Serve", "Set"],
+      "unusual_visual_domain": []
+    },
+    "aerial-airport": {
+      "classes": ["airplane"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": ["airplane"]
+    },
+    "all-elements": {
+      "classes": ["Button", "Check box", "Checked Radio button", "Checked box", "Dropdown box", "Dropdown expand", "Icon", "Radio button", "Scroll bar", "Text box"],
+      "name_alone_insufficient": ["Dropdown expand", "Icon"],
+      "requires_state_role_or_context": ["Checked Radio button", "Checked box", "Dropdown expand"],
+      "requires_special_boundary_rule": ["Button", "Check box", "Checked Radio button", "Checked box", "Dropdown box", "Dropdown expand", "Icon", "Radio button", "Scroll bar", "Text box"],
+      "unusual_visual_domain": ["Button", "Check box", "Checked Radio button", "Checked box", "Dropdown box", "Dropdown expand", "Icon", "Radio button", "Scroll bar", "Text box"]
+    },
+    "aquarium-combined": {
+      "classes": ["fish", "jellyfish", "penguin", "puffin", "shark", "starfish", "stingray"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": []
+    },
+    "defect-detection": {
+      "classes": ["defective fishplate", "fastener", "missing fastener", "non defective fishplate"],
+      "name_alone_insufficient": ["defective fishplate", "fastener", "missing fastener", "non defective fishplate"],
+      "requires_state_role_or_context": ["defective fishplate", "missing fastener", "non defective fishplate"],
+      "requires_special_boundary_rule": ["missing fastener"],
+      "unusual_visual_domain": ["defective fishplate", "fastener", "missing fastener", "non defective fishplate"]
+    },
+    "dentalai": {
+      "classes": ["Cavity", "Fillings", "Impacted Tooth", "Implant"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": ["Impacted Tooth"],
+      "requires_special_boundary_rule": ["Cavity", "Fillings"],
+      "unusual_visual_domain": ["Cavity", "Fillings", "Impacted Tooth", "Implant"]
+    },
+    "flir-camera-objects": {
+      "classes": ["bicycle", "car", "dog", "person"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": ["bicycle", "car", "dog", "person"]
+    },
+    "gwhd2021": {
+      "classes": ["Wheat Head"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": ["Wheat Head"],
+      "unusual_visual_domain": []
+    },
+    "lacrosse-object-detection": {
+      "classes": ["Goalie", "Longpole", "Referee", "Shortstick"],
+      "name_alone_insufficient": ["Longpole", "Shortstick"],
+      "requires_state_role_or_context": ["Goalie", "Referee"],
+      "requires_special_boundary_rule": ["Longpole", "Shortstick"],
+      "unusual_visual_domain": []
+    },
+    "new-defects-in-wood": {
+      "classes": ["Crack", "Dead knot", "Holes", "Live knot", "knot with crack"],
+      "name_alone_insufficient": ["Dead knot", "Live knot"],
+      "requires_state_role_or_context": ["Dead knot", "Live knot", "knot with crack"],
+      "requires_special_boundary_rule": ["Crack", "Holes", "knot with crack"],
+      "unusual_visual_domain": ["Crack", "Dead knot", "Holes", "Live knot", "knot with crack"]
+    },
+    "orionproducts": {
+      "classes": ["Candy Boom", "Chocopie Dark", "Chocopie Nor", "Marine Boy", "OStar Red", "OStar Yellow", "Swing Maxx", "Swing Nor"],
+      "name_alone_insufficient": ["Candy Boom", "Chocopie Dark", "Chocopie Nor", "Marine Boy", "OStar Red", "OStar Yellow", "Swing Maxx", "Swing Nor"],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": ["Candy Boom", "Chocopie Dark", "Chocopie Nor", "Marine Boy", "OStar Red", "OStar Yellow", "Swing Maxx", "Swing Nor"]
+    },
+    "paper-parts": {
+      "classes": ["author", "chapter", "equation", "equation number", "figure", "figure caption", "footnote", "list of content heading", "list of content text", "page number", "paragraph", "reference text", "section", "subsection", "subsubsection", "table", "table caption", "table of contents text", "title"],
+      "name_alone_insufficient": ["author", "chapter", "equation number", "figure caption", "footnote", "list of content heading", "list of content text", "reference text", "section", "subsection", "subsubsection", "table caption", "table of contents text"],
+      "requires_state_role_or_context": ["author", "chapter", "equation number", "figure caption", "footnote", "list of content heading", "list of content text", "page number", "reference text", "section", "subsection", "subsubsection", "table caption", "table of contents text", "title"],
+      "requires_special_boundary_rule": ["author", "chapter", "equation", "equation number", "figure", "figure caption", "footnote", "list of content heading", "list of content text", "page number", "paragraph", "reference text", "section", "subsection", "subsubsection", "table", "table caption", "table of contents text", "title"],
+      "unusual_visual_domain": ["author", "chapter", "equation", "equation number", "figure", "figure caption", "footnote", "list of content heading", "list of content text", "page number", "paragraph", "reference text", "section", "subsection", "subsubsection", "table", "table caption", "table of contents text", "title"]
+    },
+    "recode-waste": {
+      "classes": ["aggregate", "cardboard", "hard plastic", "metal", "soft plastic", "timber"],
+      "name_alone_insufficient": ["aggregate"],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": ["aggregate"],
+      "unusual_visual_domain": ["aggregate", "cardboard", "hard plastic", "metal", "soft plastic", "timber"]
+    },
+    "soda-bottles": {
+      "classes": ["coca-cola", "fanta", "sprite"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": []
+    },
+    "the-dreidel-project": {
+      "classes": ["Dreidel", "Gimel", "Hay", "Nun", "Shin", "Spinning Dreidel"],
+      "name_alone_insufficient": ["Gimel", "Hay", "Nun", "Shin"],
+      "requires_state_role_or_context": ["Spinning Dreidel"],
+      "requires_special_boundary_rule": ["Gimel", "Hay", "Nun", "Shin"],
+      "unusual_visual_domain": ["Dreidel", "Gimel", "Hay", "Nun", "Shin", "Spinning Dreidel"]
+    },
+    "trail-camera": {
+      "classes": ["Deer", "Hog"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": []
+    },
+    "water-meter": {
+      "classes": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": []
+    },
+    "wb-prova": {
+      "classes": ["Adult", "Juvenile", "Piglet"],
+      "name_alone_insufficient": ["Adult", "Juvenile", "Piglet"],
+      "requires_state_role_or_context": ["Adult", "Juvenile", "Piglet"],
+      "requires_special_boundary_rule": [],
+      "unusual_visual_domain": []
+    },
+    "wildfire-smoke": {
+      "classes": ["smoke"],
+      "name_alone_insufficient": [],
+      "requires_state_role_or_context": ["smoke"],
+      "requires_special_boundary_rule": ["smoke"],
+      "unusual_visual_domain": []
+    },
+    "x-ray-id": {
+      "classes": ["DIP", "MCP", "PIP", "Radius", "Ulna", "Wrist"],
+      "name_alone_insufficient": ["DIP", "MCP", "PIP"],
+      "requires_state_role_or_context": [],
+      "requires_special_boundary_rule": ["DIP", "MCP", "PIP", "Radius", "Ulna", "Wrist"],
+      "unusual_visual_domain": ["DIP", "MCP", "PIP", "Radius", "Ulna", "Wrist"]
+    }
+  }
+}

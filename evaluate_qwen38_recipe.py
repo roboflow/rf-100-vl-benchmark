@@ -16,6 +16,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import threading
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -28,7 +29,7 @@ import evaluate_qwen38_exemplar_only_ablation as exemplar
 import evaluate_qwen38_orion as base
 
 MODEL_ID = "qwen3.8-max"
-PROMPT_VERSION = "qwen3.8-max-configurable-fsod-recipe-v1"
+PROMPT_VERSION = "qwen3.8-max-configurable-fsod-recipe-v2"
 FORMULATIONS = {"single", "multi"}
 SEMANTICS = {
     "class_names",
@@ -39,6 +40,7 @@ SEMANTICS = {
 }
 REPRESENTATIONS = {"none", "numeric", "numeric_prediction", "drawn"}
 REASONING_EFFORTS = {"none", "low", "medium"}
+INSTRUCTION_MODES = {"none", "correct", "permuted"}
 TERMINAL_STATUSES = base.TERMINAL_STATUSES
 
 LOGGER = logging.getLogger("qwen38_recipe")
@@ -74,6 +76,7 @@ class Condition:
     group_reference_instances_by_image: bool = False
     explicit_sparse_references: bool = False
     all_available_references: bool = False
+    instruction_mode: str = "none"
 
     @property
     def single_class(self) -> bool:
@@ -103,6 +106,8 @@ def load_conditions(path: Path) -> tuple[Condition, ...]:
             raise ValueError(f"Unsupported representation in {condition.mode}.")
         if condition.reasoning_effort not in REASONING_EFFORTS:
             raise ValueError(f"Unsupported reasoning effort in {condition.mode}.")
+        if condition.instruction_mode not in INSTRUCTION_MODES:
+            raise ValueError(f"Unsupported instruction mode in {condition.mode}.")
         if condition.box_count < 0 or condition.box_count > 10:
             raise ValueError(f"Box count must be between 0 and 10 in {condition.mode}.")
         if condition.box_count == 0 and condition.representation != "none":
@@ -128,6 +133,10 @@ def load_conditions(path: Path) -> tuple[Condition, ...]:
             raise ValueError(
                 f"Grouped reference instances in {condition.mode} require a numeric representation."
             )
+        if condition.instruction_mode != "none" and condition.semantics != "class_names":
+            raise ValueError(
+                f"Instruction condition {condition.mode} must use semantic class names."
+            )
     return conditions
 
 
@@ -139,7 +148,61 @@ def condition_payload(condition: Condition) -> dict[str, Any]:
         payload.pop("explicit_sparse_references")
     if not payload["all_available_references"]:
         payload.pop("all_available_references")
+    if payload["instruction_mode"] == "none":
+        payload.pop("instruction_mode")
     return payload
+
+
+_OBJECT_CLASSES_HEADING = re.compile(r"(?m)^# Object Classes\s*$")
+_CLASS_SECTION_HEADING = re.compile(r"(?m)^## (?!#)(.+?)\s*$")
+
+
+def permute_class_instruction_sections(readme: str) -> str:
+    """Rotate class-section bodies while preserving the exact README vocabulary.
+
+    The overview and introduction are intentionally unchanged, making this a
+    conservative semantic control: only the detailed class-to-guidance mapping
+    is wrong. The same bodies, token content, domain, and class headings remain.
+    """
+
+    object_match = _OBJECT_CLASSES_HEADING.search(readme)
+    if object_match is None:
+        raise ValueError("README.dataset.txt lacks an '# Object Classes' section.")
+    prefix = readme[: object_match.end()]
+    remainder = readme[object_match.end() :]
+    matches = list(_CLASS_SECTION_HEADING.finditer(remainder))
+    if len(matches) < 2:
+        raise ValueError("Permuted instructions require at least two class sections.")
+    headings = [match.group(0) for match in matches]
+    bodies = [
+        remainder[match.end() : matches[index + 1].start() if index + 1 < len(matches) else None]
+        for index, match in enumerate(matches)
+    ]
+    rotated = bodies[1:] + bodies[:1]
+    rendered = []
+    for index, (heading, body) in enumerate(zip(headings, rotated, strict=True)):
+        rendered.append(heading)
+        rendered.append(body)
+        if index + 1 < len(headings) and body and not body[-1].isspace():
+            rendered.append("\n")
+    result = prefix + "".join(rendered)
+    if sorted(re.findall(r"\S+", result)) != sorted(re.findall(r"\S+", readme)):
+        raise AssertionError("Instruction permutation changed README token content.")
+    if result == readme:
+        raise AssertionError("Instruction permutation did not change the README.")
+    return result
+
+
+def instruction_text(condition: Condition, readme: str | None) -> str | None:
+    if condition.instruction_mode == "none":
+        return None
+    if not readme:
+        raise ValueError(f"Condition {condition.mode} requires README.dataset.txt.")
+    if condition.instruction_mode == "correct":
+        return readme
+    if condition.instruction_mode == "permuted":
+        return permute_class_instruction_sections(readme)
+    raise AssertionError(condition.instruction_mode)
 
 
 def concept_identifier(index: int) -> str:
@@ -346,6 +409,7 @@ def build_messages(
     self_names: dict[int, str],
     references: dict[int, tuple[box_ablation.ReferenceBox, ...]],
     assets: dict[tuple[int, int], dict[str, Path]],
+    readme: str | None = None,
 ) -> list[dict[str, Any]]:
     target = test_directory / task.file_name
     if not target.is_file():
@@ -397,6 +461,14 @@ def build_messages(
                     "unmarked objects and regions in reference images as unlabeled, "
                     "not as negative examples or exhaustive annotations."
                 )
+        guide = instruction_text(condition, readme)
+        if guide:
+            prompt += (
+                " Follow the dataset's annotator guide below when deciding what to "
+                "detect and how to localize it.\n\n"
+                "DATASET ANNOTATOR GUIDE:\n"
+                f"{guide}"
+            )
         prompt += " " + _output_contract(requested_labels)
         content.append({"type": "text", "text": prompt})
 
@@ -465,8 +537,15 @@ def token_estimate(
     condition: Condition,
     class_count: int,
     references: dict[int, tuple[box_ablation.ReferenceBox, ...]] | None = None,
+    readme: str | None = None,
 ) -> int:
-    return 3_000 * expected_images_per_request(condition, class_count, references) + 2_500
+    guide = instruction_text(condition, readme)
+    guide_tokens = (len(guide.encode("utf-8")) + 2) // 3 if guide else 0
+    return (
+        3_000 * expected_images_per_request(condition, class_count, references)
+        + 2_500
+        + guide_tokens
+    )
 
 
 class TaskRateLimiter:
@@ -733,6 +812,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     train_directory = dataset_directory / "train"
     test_directory = dataset_directory / "test"
+    readme_path = dataset_directory / "README.dataset.txt"
+    readme = (
+        readme_path.read_text(encoding="utf-8").strip()
+        if readme_path.is_file()
+        else None
+    )
+    if any(condition.instruction_mode != "none" for condition in conditions) and not readme:
+        raise FileNotFoundError(readme_path)
     train_path = train_directory / "_annotations.coco.json"
     test_path = test_directory / "_annotations.coco.json"
     train = base.load_coco(train_path)
@@ -803,7 +890,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     condition_by_mode = {condition.mode: condition for condition in conditions}
     token_estimates = {
-        condition.mode: token_estimate(condition, len(categories), references)
+        condition.mode: token_estimate(condition, len(categories), references, readme)
         for condition in conditions
     }
     reference_manifest = {
@@ -821,6 +908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dataset_directory": str(dataset_directory),
         "train_annotation_sha256": base.sha256_file(train_path),
         "test_annotation_sha256": base.sha256_file(test_path),
+        "dataset_readme_sha256": base.sha256_file(readme_path) if readme else None,
         "selected_test_image_ids": selected_image_ids,
         "conditions": [condition_payload(condition) for condition in conditions],
         "common_settings": common_settings,
@@ -885,7 +973,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         condition = condition_by_mode[task.mode]
         settings = condition_settings(condition, common_settings)
         messages = build_messages(
-            task, condition, test_directory, categories, self_names, references, assets
+            task,
+            condition,
+            test_directory,
+            categories,
+            self_names,
+            references,
+            assets,
+            readme,
         )
         existing = base.load_record(record_path(output_directory, task))
         if existing:
@@ -932,7 +1027,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels = display_labels(condition, categories, self_names)
         settings = condition_settings(condition, common_settings)
         messages = build_messages(
-            task, condition, test_directory, categories, self_names, references, assets
+            task,
+            condition,
+            test_directory,
+            categories,
+            self_names,
+            references,
+            assets,
+            readme,
         )
         return base.execute_task(
             task,

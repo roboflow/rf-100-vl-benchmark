@@ -1,0 +1,54 @@
+{
+  "conditions": [
+    {
+      "mode": "names_multi",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "none",
+      "box_count": 0,
+      "reasoning_effort": "none",
+      "seed": 1234
+    },
+    {
+      "mode": "instructions_multi",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "none",
+      "box_count": 0,
+      "reasoning_effort": "none",
+      "seed": 1234,
+      "instruction_mode": "correct"
+    },
+    {
+      "mode": "numeric_prediction_b01_multi",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 1,
+      "reasoning_effort": "none",
+      "seed": 1234,
+      "explicit_sparse_references": true
+    },
+    {
+      "mode": "instructions_numeric_prediction_b01_multi",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 1,
+      "reasoning_effort": "none",
+      "seed": 1234,
+      "explicit_sparse_references": true,
+      "instruction_mode": "correct"
+    },
+    {
+      "mode": "permuted_instructions_multi",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "none",
+      "box_count": 0,
+      "reasoning_effort": "none",
+      "seed": 1234,
+      "instruction_mode": "permuted"
+    }
+  ]
+}
