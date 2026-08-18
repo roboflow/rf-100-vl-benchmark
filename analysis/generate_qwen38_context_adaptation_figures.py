@@ -12,7 +12,6 @@ import argparse
 import csv
 import hashlib
 import json
-import math
 import textwrap
 from collections import defaultdict
 from pathlib import Path
@@ -298,41 +297,6 @@ def pretty_dataset(value: str) -> str:
     return aliases.get(value, value.replace("-", " ").title())
 
 
-def average_ranks(values: list[float]) -> list[float]:
-    order = sorted(range(len(values)), key=values.__getitem__)
-    ranks = [0.0] * len(values)
-    start = 0
-    while start < len(order):
-        end = start + 1
-        while end < len(order) and values[order[end]] == values[order[start]]:
-            end += 1
-        rank = (start + end - 1) / 2 + 1
-        for index in order[start:end]:
-            ranks[index] = rank
-        start = end
-    return ranks
-
-
-def correlation(first: list[float], second: list[float]) -> float:
-    first_mean = fmean(first)
-    second_mean = fmean(second)
-    centered_first = [value - first_mean for value in first]
-    centered_second = [value - second_mean for value in second]
-    denominator = math.sqrt(
-        sum(value**2 for value in centered_first)
-        * sum(value**2 for value in centered_second)
-    )
-    if not denominator:
-        raise ValueError("Correlation is undefined for a constant input.")
-    return sum(
-        left * right for left, right in zip(centered_first, centered_second, strict=True)
-    ) / denominator
-
-
-def spearman(first: list[float], second: list[float]) -> float:
-    return correlation(average_ranks(first), average_ranks(second))
-
-
 def class_result_index() -> dict[tuple[str, str], dict[str, str]]:
     return {
         (row["dataset"], row["class_name"]): row
@@ -510,146 +474,88 @@ def generate_card(
     }
 
 
-def draw_scatter(output_root: Path) -> None:
+def draw_grouped_gain_chart(output_root: Path) -> None:
     class_rows = read_csv(CLASS_RESULTS)
     dataset_rows = read_csv(DATASET_RESULTS)
     grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in class_rows:
         grouped[row["dataset"]].append(row)
 
-    data = []
-    for row in dataset_rows:
-        dataset = row["dataset"]
-        insufficiency = fmean(
-            int(item["name_alone_insufficient"]) for item in grouped[dataset]
-        )
-        data.append(
-            {
-                "dataset": dataset,
-                "x": insufficiency,
-                "one": float(row["one_reference_gain_mAP50"]),
-                "ten": float(row["ten_references_gain_mAP50"]),
-            }
-        )
+    dataset_groups: dict[str, str] = {}
+    for dataset, rows in grouped.items():
+        fraction = fmean(int(row["name_alone_insufficient"]) for row in rows)
+        dataset_groups[dataset] = "none" if fraction == 0 else ("all" if fraction == 1 else "some")
 
-    correlations = {
-        key: spearman(
-            [row["x"] for row in data],
-            [row[key] for row in data],
-        )
-        for key in ("one", "ten")
-    }
+    group_definitions = (
+        ("none", "No labels\nunder-specified"),
+        ("some", "Some labels\nunder-specified"),
+        ("all", "Every label\nunder-specified"),
+    )
+    data: dict[str, dict[str, float | int]] = {}
+    for key, _ in group_definitions:
+        rows = [row for row in dataset_rows if dataset_groups[row["dataset"]] == key]
+        data[key] = {
+            "count": len(rows),
+            "one_mAP50_95": fmean(float(row["one_reference_gain_mAP50_95"]) for row in rows),
+            "one_mAP50": fmean(float(row["one_reference_gain_mAP50"]) for row in rows),
+            "ten_mAP50_95": fmean(float(row["ten_references_gain_mAP50_95"]) for row in rows),
+            "ten_mAP50": fmean(float(row["ten_references_gain_mAP50"]) for row in rows),
+        }
 
     canvas = Image.new("RGB", (1700, 760), "#ffffff")
     draw = ImageDraw.Draw(canvas)
     draw.text(
         (50, 25),
-        "Visual-reference gain rises as class names become less sufficient",
+        "Visual references help most when class names are under-specified",
         fill="#0f172a",
         font=font(34, bold=True),
     )
     draw.text(
         (50, 70),
-        "Each point is one complete RF20 dataset; y-axis is gain over class names only; ρ: 0 = none, 1 = perfect ranking",
+        "Average dataset gain over class names only; groups were rated before these scores were analyzed",
         fill="#475569",
         font=font(20),
     )
 
-    plot_top, plot_bottom = 145, 680
-    plot_width = 730
-    y_min, y_max = -45.0, 30.0
-    abbreviations = {
-        "aerial-airport": "Airport",
-        "aquarium-combined": "Aquarium",
-        "defect-detection": "Defect",
-        "flir-camera-objects": "FLIR",
-        "gwhd2021": "Wheat",
-        "lacrosse-object-detection": "Lacrosse",
-        "new-defects-in-wood": "Wood",
-        "orionproducts": "Orion",
-        "paper-parts": "Paper",
-        "recode-waste": "Waste",
-        "soda-bottles": "Soda",
-        "the-dreidel-project": "Dreidel",
-        "trail-camera": "Trail",
-        "water-meter": "Digits",
-        "wb-prova": "Age groups",
-        "wildfire-smoke": "Smoke",
-        "x-ray-id": "X-ray",
-        "all-elements": "UI elements",
-        "dentalai": "Dental",
-        "actions": "Actions",
-    }
-    for plot_index, (key, title) in enumerate(
-        (("one", "One visual reference per class"), ("ten", "Ten visual references per class"))
-    ):
+    legend_y = 112
+    for index, (label, color) in enumerate((("1 reference/class", "#0284c7"), ("10 references/class", "#7c3aed"))):
+        x = 1120 + index * 280
+        draw.rectangle((x, legend_y, x + 24, legend_y + 24), fill=color)
+        draw.text((x + 34, legend_y - 1), label, fill="#334155", font=font(18, bold=True))
+
+    plot_top, plot_bottom = 180, 620
+    plot_width = 720
+    y_min, y_max = -6.0, 22.0
+    for plot_index, (metric, title) in enumerate((("mAP50_95", "mAP50–95 gain"), ("mAP50", "mAP50 gain"))):
         left = 70 + plot_index * 820
         right = left + plot_width
-        draw.rectangle((left, plot_top, right, plot_bottom), outline="#94a3b8", width=2)
-        zero_y = plot_bottom - (0 - y_min) / (y_max - y_min) * (plot_bottom - plot_top)
-        draw.line((left, zero_y, right, zero_y), fill="#64748b", width=2)
-        for tick in (-40, -20, 0, 20):
+        draw.text((left + 250, 140), title, fill="#0f172a", font=font(24, bold=True))
+        for tick in (-5, 0, 5, 10, 15, 20):
             y = plot_bottom - (tick - y_min) / (y_max - y_min) * (plot_bottom - plot_top)
-            draw.line((left, y, right, y), fill="#e2e8f0", width=1)
-            draw.text((left - 52, y - 10), f"{tick:+d}", fill="#475569", font=font(16))
-        for tick in (0.0, 0.25, 0.5, 0.75, 1.0):
-            x = left + tick * plot_width
-            draw.line((x, plot_top, x, plot_bottom), fill="#f1f5f9", width=1)
-            draw.text((x - 14, plot_bottom + 8), f"{tick:.2g}", fill="#475569", font=font(15))
-        draw.text((left, 110), title, fill="#0f172a", font=font(24, bold=True))
-        draw.text(
-            (right - 205, 112),
-            f"Spearman ρ = {correlations[key]:.2f}",
-            fill="#334155",
-            font=font(19, bold=True),
-        )
-        points = []
-        for row in data:
-            x = left + row["x"] * plot_width
-            y = plot_bottom - (row[key] - y_min) / (y_max - y_min) * (plot_bottom - plot_top)
-            points.append((row, x, y))
-
-        label_positions: dict[str, float] = {}
-        for bucket in range(5):
-            bucket_points = sorted(
-                (
-                    (row, x, y)
-                    for row, x, y in points
-                    if min(4, int(row["x"] * 5)) == bucket
-                ),
-                key=lambda item: item[2],
-            )
-            previous = plot_top - 18
-            provisional = []
-            for row, x, y in bucket_points:
-                label_y = max(y - 9, previous + 17)
-                provisional.append([row, x, y, label_y])
-                previous = label_y
-            if provisional and provisional[-1][3] > plot_bottom - 18:
-                shift = provisional[-1][3] - (plot_bottom - 18)
-                for item in provisional:
-                    item[3] -= shift
-            for row, _, _, label_y in provisional:
-                label_positions[row["dataset"]] = label_y
-
-        for row, x, y in points:
-            color = "#0ea5e9" if row[key] >= 0 else "#f43f5e"
-            draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=color, outline="#ffffff", width=2)
-            label = abbreviations.get(row["dataset"], row["dataset"])
-            label_width = draw.textlength(label, font=font(13))
-            label_x = x + 8 if row["x"] < 0.82 else x - label_width - 9
-            label_y = label_positions[row["dataset"]]
-            if abs(label_y - (y - 9)) > 12:
-                line_end_x = label_x - 2 if row["x"] < 0.82 else label_x + label_width + 2
-                draw.line((x, y, line_end_x, label_y + 8), fill="#94a3b8", width=1)
-            draw.text((label_x, label_y), label, fill="#334155", font=font(13))
-        draw.text(
-            (left + 205, 720),
-            "Fraction of classes whose names are insufficient",
-            fill="#334155",
-            font=font(18),
-        )
-    canvas.save(output_root / "label_insufficiency_vs_visual_gain.png", optimize=True)
+            draw.line((left, y, right, y), fill="#cbd5e1" if tick == 0 else "#e2e8f0", width=2 if tick == 0 else 1)
+            draw.text((left - 46, y - 10), f"{tick:+d}", fill="#475569", font=font(16))
+        cluster_width = plot_width / 3
+        for group_index, (group_key, group_label) in enumerate(group_definitions):
+            center = left + cluster_width * (group_index + 0.5)
+            for bar_index, (mode, color) in enumerate((("one", "#0284c7"), ("ten", "#7c3aed"))):
+                value = float(data[group_key][f"{mode}_{metric}"])
+                zero_y = plot_bottom - (0 - y_min) / (y_max - y_min) * (plot_bottom - plot_top)
+                value_y = plot_bottom - (value - y_min) / (y_max - y_min) * (plot_bottom - plot_top)
+                x0 = center - 74 + bar_index * 78
+                x1 = x0 + 68
+                draw.rectangle((x0, min(zero_y, value_y), x1, max(zero_y, value_y)), fill=color)
+                value_text = f"{value:+.2f}"
+                value_width = draw.textlength(value_text, font=font(16, bold=True))
+                text_y = value_y - 25 if value >= 0 else value_y + 5
+                draw.text((x0 + (68 - value_width) / 2, text_y), value_text, fill="#0f172a", font=font(16, bold=True))
+            label_lines = group_label.split("\n")
+            for line_index, line in enumerate(label_lines):
+                line_width = draw.textlength(line, font=font(17, bold=True))
+                draw.text((center - line_width / 2, 642 + line_index * 23), line, fill="#334155", font=font(17, bold=True))
+            count = f"({int(data[group_key]['count'])} datasets)"
+            count_width = draw.textlength(count, font=font(15))
+            draw.text((center - count_width / 2, 692), count, fill="#64748b", font=font(15))
+    canvas.save(output_root / "visual_gain_by_dataset_label_sufficiency.png", optimize=True)
 
 
 def draw_shareable_card_sheet(
@@ -695,9 +601,9 @@ def draw_shareable_summary(output_root: Path) -> None:
         font=font(22),
     )
 
-    scatter = Image.open(output_root / "label_insufficiency_vs_visual_gain.png").convert("RGB")
-    scatter = ImageOps.fit(scatter, (1220, 545), Image.Resampling.LANCZOS)
-    canvas.paste(scatter, (35, 160))
+    grouped_chart = Image.open(output_root / "visual_gain_by_dataset_label_sufficiency.png").convert("RGB")
+    grouped_chart = ImageOps.fit(grouped_chart, (1220, 545), Image.Resampling.LANCZOS)
+    canvas.paste(grouped_chart, (35, 160))
 
     panel = (1280, 160, 1880, 705)
     draw.rounded_rectangle(panel, radius=24, fill="#0f172a")
@@ -707,7 +613,6 @@ def draw_shareable_summary(output_root: Path) -> None:
         ("Class names only", "24.37 / 43.54", "baseline"),
         ("Instructions", "24.46 / 44.58", "+0.09 / +1.04"),
         ("1 visual ref/class", "25.35 / 46.73", "+0.98 / +3.19"),
-        ("2 visual refs/class", "25.14 / 46.55", "+0.77 / +3.01"),
         ("10 visual refs/class", "25.74 / 47.92", "+1.37 / +4.38"),
     )
     for index, (label, score, delta) in enumerate(rows):
@@ -737,9 +642,9 @@ def draw_shareable_summary(output_root: Path) -> None:
         ),
         (
             1280,
-            "Recommended use",
-            "Class names remain the default",
-            "Use 1 visual ref for opaque tasks",
+            "Three practical modes",
+            "Names default • 1 ref efficient",
+            "10 refs = highest observed score",
             "#7c3aed",
         ),
     )
@@ -810,7 +715,7 @@ def main() -> None:
             manifest.append(
                 generate_card(dataset, class_name, group, class_results, args.output)
             )
-    draw_scatter(args.output)
+    draw_grouped_gain_chart(args.output)
     draw_shareable_exports(args.output)
     manifest_path = args.output / "selection_manifest.json"
     manifest_path.write_text(
@@ -831,7 +736,7 @@ def main() -> None:
         + "\n",
         encoding="utf-8",
     )
-    print(f"Generated {len(manifest)} evidence cards and one scatter plot in {args.output}")
+    print(f"Generated {len(manifest)} evidence cards and one grouped-gain chart in {args.output}")
 
 
 if __name__ == "__main__":

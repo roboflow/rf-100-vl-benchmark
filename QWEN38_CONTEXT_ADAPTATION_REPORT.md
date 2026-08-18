@@ -7,6 +7,12 @@
 > objects. Instructions are understood, but visual examples generally transfer
 > dataset-specific appearance more effectively.
 
+The practical choices are class names only as the simplest default, one visual
+reference per class as the efficient adaptation mode, and ten references per
+class as the accuracy-maximizing mode measured here. Ten references achieved
+the highest RF20 score, but its small lead over one reference is within the
+measured noise proxy and costs about 3.4× as much.
+
 We evaluated one multi-class request per test image on all 20 RF20-VL-FSOD
 datasets: 3,970 images, reasoning off, temperature 0, fixed seed, normalized
 0–1000 XYXY reference boxes, and COCO `maxDets=500` scoring.
@@ -51,7 +57,6 @@ Scores are dataset-macro `mAP50–95 / mAP50`.
 | Class names only | 24.37 | 43.54 | baseline | **$22.28** |
 | Annotator instructions | 24.46 | 44.58 | +0.09 / +1.04 | $26.21 |
 | 1 positive visual reference/class | 25.35 | 46.73 | +0.98 / +3.19 | $34.20 |
-| 2 positive visual references/class | 25.14 | 46.55 | +0.77 / +3.01 | $44.43 |
 | 10 positive visual references/class | **25.74** | **47.92** | **+1.37 / +4.38** | $116.79 |
 
 <details>
@@ -68,7 +73,6 @@ input, $0.25/M implicit-cache input, and $6/M output**.
 | Class names only | 5.333M | 0.004M | 1.936M | $22.28 |
 | Annotator instructions | 7.388M | 1.302M | 1.851M | $26.21 |
 | 1 visual reference/class | 6.946M | 39.046M | 1.757M | $34.20 |
-| 2 visual references/class | 7.093M | 78.142M | 1.784M | $44.43 |
 | 10 visual references/class | 8.695M | 354.710M | 1.788M | $116.79 |
 
 The formula is `(uncached input × $2 + cache-hit input × $0.25 + output ×
@@ -82,68 +86,59 @@ may alter effective spend. The estimate also excludes 31 failed API attempts
 across 19,850 condition-image tasks that returned no billable-usage metadata;
 most were provider-side image download or content-rejection errors.
 
-Recorded sources: [class names, one, and two references](qwen38-fsod-runs/rf20-three-way-matched-v1/rf20_summary.json),
+Recorded sources: [class names and one reference](qwen38-fsod-runs/rf20-three-way-matched-v1/rf20_summary.json),
 [instructions](qwen38-fsod-runs/instruction-study-v2/full-rf20/rf20_summary.json),
 and [ten references](qwen38-fsod-runs/rf20-all-available-explicit-sparse-v1/rf20_summary.json).
 
 </details>
 
 Compared with the repeatability range above, instructions are within noise, one
-and two references are borderline in the RF20 macro, and ten references only
-approach the upper end of the proxy range for mAP50. The macro average hides the
-main finding: **the direction and size of the effect depend strongly on the
+reference is borderline in the RF20 macro, and ten references only approach the
+upper end of the proxy range for mAP50. The macro average hides the main
+finding: **the direction and size of the effect depend strongly on the
 dataset.**
 
-![Visual-reference gain versus label insufficiency](figures/qwen38_context_adaptation/label_insufficiency_vs_visual_gain.png)
+![Visual-reference gain by label sufficiency](figures/qwen38_context_adaptation/visual_gain_by_dataset_label_sufficiency.png)
 
-## Does label ambiguity predict who benefits?
+## Who benefited from visual references?
 
 Before the instruction study was scored, we rated each of the 110 class names
 using only the label text. A class was marked **under-specified** when its name
 alone did not clearly identify the intended visual target or annotation
-meaning. For each of the 20 datasets, we then compared:
-
-1. the fraction of its classes marked under-specified; and
-2. its score gain from visual references.
-
-The exact 110 ratings and criteria are in the locked
+meaning. The exact 110 ratings and criteria are in the locked
 [label-sufficiency file](qwen38-fsod-configs/rf20-label-sufficiency-ratings.json).
 
-The table reports Spearman rank correlation, where `0` means no ranking
-relationship and `1` means a perfect positive relationship. These are
-correlations, not mAP values.
+The most direct dataset-level comparison is:
 
-| References per class | Correlation with mAP50–95 gain | Correlation with mAP50 gain | Interpretation |
-|---:|---:|---:|---|
-| 1 | **0.80** | **0.79** | Strong positive relationship |
-| 2 | **0.70** | **0.77** | Strong positive relationship |
-| 10 | **0.56** | **0.69** | Moderate-to-strong positive relationship |
+| Pre-rated dataset group | Datasets | Instructions | 1 visual reference/class | 10 visual references/class |
+|---|---:|---:|---:|---:|
+| No class names under-specified | 9 | −2.89 / −4.42 | −2.52 / −3.46 | −2.28 / −3.05 |
+| Some class names under-specified | 8 | +2.11 / +4.86 | +2.72 / +6.77 | +2.17 / +7.10 |
+| Every class name under-specified | 3 | +3.59 / +7.24 | +6.82 / +13.57 | **+10.20 / +19.43** |
 
-In plain language, datasets containing more unclear or dataset-specific class
-names generally received larger visual-reference gains. The relationship
-remained positive after removing any one dataset, so no single dataset created
-the overall trend. For one reference, it also remained strong after adjusting
-for baseline accuracy, test-image count, and class count: **0.83 mAP50–95 / 0.75
-mAP50**. A narrower rating for labels requiring state or scene context showed
-the same direction but a weaker relationship: **0.48 / 0.62** with one
-reference, **0.43 / 0.55** with two, and **0.49 / 0.54** with ten.
+Each cell is the average dataset gain over class names only, not a correlation.
+Datasets with no under-specified labels regressed on average. Datasets with a
+mixture of sufficient and under-specified labels improved. In the three
+datasets where every label was under-specified, ten references produced the
+largest observed gain.
 
-A second analysis grouped the 110 individual classes by the pre-rated label:
+The class-level comparison shows the same separation:
 
-| References per class | 47 under-specified classes: average gain | 63 sufficient-name classes: average gain | Gap between groups |
-|---:|---:|---:|---:|
-| 1 | +6.68 / +12.68 | −2.22 / −1.84 | **+8.90 / +14.52** |
-| 10 | +6.57 / +13.88 | −3.89 / −4.97 | **+10.46 / +18.85** |
+| Pre-rated class group | Classes | 1 visual reference | 10 visual references |
+|---|---:|---:|---:|
+| Name alone is under-specified | 47 | **+6.68 / +12.68** | **+6.57 / +13.88** |
+| Name alone is sufficient | 63 | −2.22 / −1.84 | −3.89 / −4.97 |
+| Requires state, role, or scene context | 37 | **+8.37 / +13.91** | **+8.76 / +15.16** |
+| Does not require state, role, or scene context | 73 | −1.86 / −0.48 | −3.57 / −3.04 |
 
-For example, with one reference the under-specified classes gained an average
-of **6.68 mAP50–95 / 12.68 mAP50**, while classes whose names were already
-sufficient lost **2.22 / 1.84**. The last column is simply the difference
-between those group averages.
-
-The group separation is statistically clear for mAP50 after accounting for
-classes sharing the same dataset. It is not clear for mAP50–95. This suggests
-that references improve recognizing *what* should be detected more consistently
-than they improve precise localization across stricter IoU thresholds.
+These are direct average class gains. After resampling complete datasets rather
+than treating their classes as independent, the gain for under-specified
+classes remained above zero on **both** mAP50–95 and mAP50 with either one or
+ten references. The exact mAP50–95 *gap between the two class groups* was less
+certain; that does not mean the observed under-specified-class gain was unclear.
+The strongest evidence is still for mAP50, suggesting that references improve
+recognizing *what* should be detected more consistently than exact localization
+at stricter IoU thresholds.
 
 ## Where visual adaptation helped
 
@@ -210,9 +205,12 @@ annotation semantics, yet ten references regressed by **−12.39 / −12.77**.
 Within datasets containing both simple and under-specified classes, class-name
 sufficiency alone did not consistently identify the winning class. The finding
 therefore supports **dataset-level routing**, not an automatic per-class rule.
-More examples are also not monotonically better: ten references are only
-+0.40 / +1.20 above one reference in the RF20 macro despite costing over 3× as
-much.
+
+The RF20 macro increases in the order class names → one reference → ten
+references, but that ordering is not universal: it holds strictly on only 7/20
+datasets for mAP50–95 and 10/20 for mAP50. Ten references are only +0.40 / +1.20
+above one reference in the RF20 macro, which is within the measured noise proxy,
+despite costing over 3× as much.
 
 This is strong exploratory evidence, not a prospective causal result. The
 ratings themselves were assigned without viewing scores, but the hypothesis was
@@ -263,43 +261,54 @@ scene context, the advantage was **+7.21 / +11.28**. Both differences remained
 above zero after accounting for classes sharing a dataset. One reference showed
 the same direction, but that comparison was still within uncertainty.
 
-## Decision
+## Three practical modes
 
-- Keep **class names only** as the cheap, robust default.
-- Use **one boxed visual reference per class** as an optional dataset-adaptation
-  mode when labels are opaque, state-dependent, or visually dataset-specific.
-- Do not add instructions or ten references indiscriminately.
-- Treat label sufficiency as a dataset-level routing signal, not a guarantee.
-- The clean prospective confirmation is a matched correct-reference versus
-  class-shuffled-reference control using the already locked sufficiency ratings.
+The results support three increasingly expansive modes:
+
+1. **Class names only:** the cheapest, simplest default at **24.37 / 43.54**.
+2. **One boxed visual reference per class:** the best accuracy-cost tradeoff for
+   opaque, state-dependent, or visually dataset-specific tasks, at **25.35 /
+   46.73**.
+3. **Ten boxed visual references per class:** the highest measured RF20 score at
+   **25.74 / 47.92**, and the largest observed gain when every class name in a
+   dataset was under-specified. This is the accuracy-maximizing mode measured
+   here, but its +0.40 / +1.20 lead over one reference is within the noise proxy
+   and costs about 3.4× as much.
+
+Therefore, ten references should be described as the **highest observed score**,
+not as reliably superior to one reference. Label sufficiency is a useful
+dataset-level routing signal, not a guarantee. Instructions remain useful as a
+separate research result, but they are not one of the recommended deployment
+modes. The clean prospective confirmation is a matched correct-reference versus
+class-shuffled-reference control using the already locked sufficiency ratings.
 
 <details>
 <summary><strong>All 20 per-dataset deltas versus class names only</strong></summary>
 
 Each cell is `mAP50–95 / mAP50`.
 
-| Dataset | Instructions | 1 visual | 2 visual | 10 visual |
-|---|---:|---:|---:|---:|
-| Actions | +0.83 / +0.96 | +2.11 / +3.55 | +2.55 / +5.35 | +2.02 / +4.57 |
-| Aerial Airport | −3.95 / −7.69 | −0.14 / −2.01 | +2.48 / +2.04 | +3.41 / +2.06 |
-| All Elements | −6.47 / −0.47 | −7.59 / −0.65 | −16.79 / −17.63 | −12.39 / −12.77 |
-| Aquarium Combined | −2.93 / −2.02 | −3.14 / −0.42 | −3.60 / −2.35 | −3.32 / −0.34 |
-| Defect Detection | +8.60 / +13.22 | +4.16 / +6.35 | +7.40 / +10.97 | +11.25 / +18.85 |
-| DentalAI | −0.65 / −1.95 | +0.45 / +1.04 | +1.09 / +1.47 | +0.28 / +0.85 |
-| FLIR Camera Objects | −1.84 / −4.71 | +0.12 / −1.68 | +0.05 / +0.09 | −3.85 / −7.24 |
-| Global Wheat Head | −3.56 / −4.33 | −2.69 / −3.64 | −3.16 / −3.99 | −3.12 / −4.54 |
-| Lacrosse Object Detection | +1.46 / +2.93 | +0.55 / +4.18 | +0.40 / +4.92 | −0.49 / +5.75 |
-| New Defects in Wood | +1.90 / +7.35 | +1.63 / +3.84 | +1.02 / +4.46 | +1.22 / +4.54 |
-| Orion Products | +0.51 / +7.88 | +3.97 / +18.25 | +3.01 / +14.51 | +1.84 / +15.11 |
-| Paper Parts | −0.50 / −0.04 | +13.60 / +19.25 | +9.89 / +16.10 | +9.73 / +16.13 |
-| Recode Waste | +4.09 / +7.49 | +1.22 / +3.07 | +0.86 / +3.31 | +3.96 / +6.68 |
-| Soda Bottles | +0.12 / −0.35 | +0.84 / +0.70 | +1.57 / +2.06 | +2.01 / +3.37 |
-| The Dreidel Project | +15.50 / +19.89 | +9.66 / +17.39 | +14.55 / +23.30 | +10.71 / +22.26 |
-| Trail Camera | +0.94 / −1.00 | −1.67 / −0.27 | −1.04 / +0.95 | −0.43 / +0.91 |
-| Water Meter | −15.00 / −26.63 | −16.55 / −29.58 | −19.42 / −37.85 | −20.57 / −41.40 |
-| WB Prova | +1.68 / +0.62 | +12.32 / +16.12 | +11.86 / +16.63 | +17.51 / +24.32 |
-| Wildfire Smoke | +0.88 / +8.90 | +0.11 / +4.69 | +0.90 / +9.05 | +5.06 / +18.90 |
-| X-ray ID | +0.10 / +0.74 | +0.61 / +3.53 | +1.73 / +6.74 | +2.62 / +9.62 |
+| Dataset | Instructions | 1 visual | 10 visual |
+|---|---:|---:|---:|
+| Actions | +0.83 / +0.96 | +2.11 / +3.55 | +2.02 / +4.57 |
+| Aerial Airport | −3.95 / −7.69 | −0.14 / −2.01 | +3.41 / +2.06 |
+| All Elements | −6.47 / −0.47 | −7.59 / −0.65 | −12.39 / −12.77 |
+| Aquarium Combined | −2.93 / −2.02 | −3.14 / −0.42 | −3.32 / −0.34 |
+| Defect Detection | +8.60 / +13.22 | +4.16 / +6.35 | +11.25 / +18.85 |
+| DentalAI | −0.65 / −1.95 | +0.45 / +1.04 | +0.28 / +0.85 |
+| FLIR Camera Objects | −1.84 / −4.71 | +0.12 / −1.68 | −3.85 / −7.24 |
+| Global Wheat Head | −3.56 / −4.33 | −2.69 / −3.64 | −3.12 / −4.54 |
+| Lacrosse Object Detection | +1.46 / +2.93 | +0.55 / +4.18 | −0.49 / +5.75 |
+| New Defects in Wood | +1.90 / +7.35 | +1.63 / +3.84 | +1.22 / +4.54 |
+| Orion Products | +0.51 / +7.88 | +3.97 / +18.25 | +1.84 / +15.11 |
+| Paper Parts | −0.50 / −0.04 | +13.60 / +19.25 | +9.73 / +16.13 |
+| Recode Waste | +4.09 / +7.49 | +1.22 / +3.07 | +3.96 / +6.68 |
+| Soda Bottles | +0.12 / −0.35 | +0.84 / +0.70 | +2.01 / +3.37 |
+| The Dreidel Project | +15.50 / +19.89 | +9.66 / +17.39 | +10.71 / +22.26 |
+| Trail Camera | +0.94 / −1.00 | −1.67 / −0.27 | −0.43 / +0.91 |
+| Water Meter | −15.00 / −26.63 | −16.55 / −29.58 | −20.57 / −41.40 |
+| WB Prova | +1.68 / +0.62 | +12.32 / +16.12 | +17.51 / +24.32 |
+| Wildfire Smoke | +0.88 / +8.90 | +0.11 / +4.69 | +5.06 / +18.90 |
+| X-ray ID | +0.10 / +0.74 | +0.61 / +3.53 | +2.62 / +9.62 |
 
 </details>
 
@@ -326,5 +335,6 @@ claims come from the complete COCO evaluations above.
 ## Shareable figure downloads
 
 - [Download the headline summary PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)
+- [Download the direct label-sufficiency comparison PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/visual_gain_by_dataset_label_sufficiency.png)
 - [Download the visual-references-helped examples PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/shareable_visual_references_helped.png)
 - [Download the visual-references-hurt examples PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/shareable_visual_references_hurt.png)
