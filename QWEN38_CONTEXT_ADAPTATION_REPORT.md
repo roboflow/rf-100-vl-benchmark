@@ -11,6 +11,14 @@ We evaluated one multi-class request per test image on all 20 RF20-VL-FSOD
 datasets: 3,970 images, reasoning off, temperature 0, fixed seed, normalized
 0–1000 XYXY reference boxes, and COCO `maxDets=500` scoring.
 
+## Shareable figures
+
+[![Shareable Qwen3.8-Max context-adaptation summary](figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)](figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)
+
+| Visual references helped | Visual references hurt or failed |
+|---|---|
+| [![Examples where visual references helped](figures/qwen38_context_adaptation/shareable_visual_references_helped.png)](figures/qwen38_context_adaptation/shareable_visual_references_helped.png) | [![Examples where visual references hurt or failed](figures/qwen38_context_adaptation/shareable_visual_references_hurt.png)](figures/qwen38_context_adaptation/shareable_visual_references_hurt.png) |
+
 ## Complete RF20 result
 
 Scores are dataset-macro `mAP50–95 / mAP50`.

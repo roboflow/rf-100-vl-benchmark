@@ -652,6 +652,149 @@ def draw_scatter(output_root: Path) -> None:
     canvas.save(output_root / "label_insufficiency_vs_visual_gain.png", optimize=True)
 
 
+def draw_shareable_card_sheet(
+    output_root: Path,
+    *,
+    filename: str,
+    title: str,
+    subtitle: str,
+    cards: tuple[str, ...],
+) -> None:
+    canvas = Image.new("RGB", (1920, 1850), COLORS["background"])
+    draw = ImageDraw.Draw(canvas)
+    draw.text((52, 38), title, fill=COLORS["text"], font=font(46, bold=True))
+    draw.text((54, 102), subtitle, fill=COLORS["muted"], font=font(23))
+    card_width, card_height = 880, 784
+    positions = ((50, 165), (990, 165), (50, 1010), (990, 1010))
+    for card_name, position in zip(cards, positions, strict=True):
+        card = Image.open(output_root / card_name).convert("RGB")
+        card = ImageOps.fit(card, (card_width, card_height), Image.Resampling.LANCZOS)
+        canvas.paste(card, position)
+    draw.text(
+        (54, 1810),
+        "Cards show one real boxed train exemplar and the same test image under both prediction modes.",
+        fill=COLORS["muted"],
+        font=font(18),
+    )
+    canvas.save(output_root / filename, optimize=True)
+
+
+def draw_shareable_summary(output_root: Path) -> None:
+    canvas = Image.new("RGB", (1920, 1250), "#f8fafc")
+    draw = ImageDraw.Draw(canvas)
+    draw.text(
+        (54, 34),
+        "Qwen3.8-Max: visual references behave like dataset adaptation",
+        fill="#0f172a",
+        font=font(43, bold=True),
+    )
+    draw.text(
+        (56, 94),
+        "They help most when class names under-specify appearance or state, but can hurt familiar-object tasks.",
+        fill="#475569",
+        font=font(22),
+    )
+
+    scatter = Image.open(output_root / "label_insufficiency_vs_visual_gain.png").convert("RGB")
+    scatter = ImageOps.fit(scatter, (1220, 545), Image.Resampling.LANCZOS)
+    canvas.paste(scatter, (35, 160))
+
+    panel = (1280, 160, 1880, 705)
+    draw.rounded_rectangle(panel, radius=24, fill="#0f172a")
+    draw.text((1320, 196), "RF20-VL-FSOD macro", fill="#ffffff", font=font(28, bold=True))
+    draw.text((1320, 238), "mAP50–95 / mAP50", fill="#cbd5e1", font=font(18))
+    rows = (
+        ("Class names only", "24.37 / 43.54", "baseline"),
+        ("Instructions", "24.46 / 44.58", "+0.09 / +1.04"),
+        ("1 visual ref/class", "25.35 / 46.73", "+0.98 / +3.19"),
+        ("2 visual refs/class", "25.14 / 46.55", "+0.77 / +3.01"),
+        ("10 visual refs/class", "25.74 / 47.92", "+1.37 / +4.38"),
+    )
+    for index, (label, score, delta) in enumerate(rows):
+        y = 286 + index * 76
+        if index:
+            draw.line((1320, y - 13, 1840, y - 13), fill="#334155", width=1)
+        draw.text((1320, y), label, fill="#f8fafc", font=font(20, bold=True))
+        draw.text((1320, y + 28), score, fill="#cbd5e1", font=font(18))
+        delta_color = "#5ee6a8" if delta != "baseline" else "#94a3b8"
+        delta_width = draw.textlength(delta, font=font(18, bold=True))
+        draw.text((1840 - delta_width, y + 28), delta, fill=delta_color, font=font(18, bold=True))
+
+    evidence_boxes = (
+        (
+            40,
+            "Under-specified classes",
+            "+6.68 / +12.68 with one reference",
+            "vs −2.22 / −1.84 for sufficient names",
+            "#0284c7",
+        ),
+        (
+            660,
+            "Noise-confirmed gains",
+            "Paper Parts: +13.43 / +20.07",
+            "Actions: +2.22 / +4.98",
+            "#059669",
+        ),
+        (
+            1280,
+            "Recommended use",
+            "Class names remain the default",
+            "Use 1 visual ref for opaque tasks",
+            "#7c3aed",
+        ),
+    )
+    for x, heading, first, second, accent in evidence_boxes:
+        draw.rounded_rectangle((x, 760, x + 600, 1000), radius=22, fill="#ffffff", outline="#cbd5e1", width=2)
+        draw.rectangle((x, 760, x + 12, 1000), fill=accent)
+        draw.text((x + 38, 798), heading, fill="#0f172a", font=font(26, bold=True))
+        draw.text((x + 38, 858), first, fill="#334155", font=font(21, bold=True))
+        draw.text((x + 38, 902), second, fill="#475569", font=font(19))
+
+    draw.rounded_rectangle((40, 1050, 1880, 1195), radius=22, fill="#e2e8f0")
+    takeaway = (
+        "General trend, not a universal rule: visual examples transfer dataset-specific appearance "
+        "better than instructions, but the effect is heterogeneous and primarily dataset-level."
+    )
+    wrapped = textwrap.wrap(takeaway, width=116)
+    for index, line in enumerate(wrapped):
+        draw.text((76, 1082 + index * 37), line, fill="#0f172a", font=font(25, bold=True))
+    canvas.save(output_root / "shareable_context_adaptation_summary.png", optimize=True)
+
+
+def draw_shareable_exports(output_root: Path) -> None:
+    draw_shareable_summary(output_root)
+    draw_shareable_card_sheet(
+        output_root,
+        filename="shareable_visual_references_helped.png",
+        title="When boxed visual references helped",
+        subtitle=(
+            "Dataset-specific appearance, state, and annotation semantics • "
+            "scores are class AP50 and AP50–95"
+        ),
+        cards=(
+            "under_specified_helped__paper-parts__table-of-contents-text.png",
+            "under_specified_helped__defect-detection__defective-fishplate.png",
+            "under_specified_helped__the-dreidel-project__spinning-dreidel.png",
+            "under_specified_helped__wb-prova__juvenile.png",
+        ),
+    )
+    draw_shareable_card_sheet(
+        output_root,
+        filename="shareable_visual_references_hurt.png",
+        title="When extra visual context hurt or failed",
+        subtitle=(
+            "Familiar labels and one important ambiguous-label counterexample • "
+            "same evaluation and scoring"
+        ),
+        cards=(
+            "familiar_hurt__water-meter__4.png",
+            "familiar_hurt__flir-camera-objects__dog.png",
+            "familiar_hurt__gwhd2021__wheat-head.png",
+            "counterexample__all-elements__checked-radio-button.png",
+        ),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=OUTPUT_ROOT)
@@ -668,6 +811,7 @@ def main() -> None:
                 generate_card(dataset, class_name, group, class_results, args.output)
             )
     draw_scatter(args.output)
+    draw_shareable_exports(args.output)
     manifest_path = args.output / "selection_manifest.json"
     manifest_path.write_text(
         json.dumps(
