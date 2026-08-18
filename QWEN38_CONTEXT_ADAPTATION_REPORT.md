@@ -46,13 +46,47 @@ occur. The exact threshold definition and six-run results are in the
 
 Scores are dataset-macro `mAP50–95 / mAP50`.
 
-| Context given to Qwen3.8-Max | mAP50–95 | mAP50 | Gain vs. names | Estimated cost |
+| Context given to Qwen3.8-Max | mAP50–95 | mAP50 | Gain vs. names | List-price estimate for this run* |
 |---|---:|---:|---:|---:|
 | Class names only | 24.37 | 43.54 | baseline | **$22.28** |
 | Annotator instructions | 24.46 | 44.58 | +0.09 / +1.04 | $26.21 |
 | 1 positive visual reference/class | 25.35 | 46.73 | +0.98 / +3.19 | $34.20 |
 | 2 positive visual references/class | 25.14 | 46.55 | +0.77 / +3.01 | $44.43 |
 | 10 positive visual references/class | **25.74** | **47.92** | **+1.37 / +4.38** | $116.79 |
+
+<details>
+<summary><strong>*How the cost estimates were audited</strong></summary>
+
+These are reproducible list-price estimates, not invoice totals. Each API
+response recorded total input tokens, implicit-cache-hit input tokens, and
+output tokens. We applied the model-specific rates published for
+[Qwen3.8-Max](https://www.qwencloud.com/models/qwen3.8-max): **$2/M uncached
+input, $0.25/M implicit-cache input, and $6/M output**.
+
+| Context | Uncached input | Cache-hit input | Output | Calculated estimate |
+|---|---:|---:|---:|---:|
+| Class names only | 5.333M | 0.004M | 1.936M | $22.28 |
+| Annotator instructions | 7.388M | 1.302M | 1.851M | $26.21 |
+| 1 visual reference/class | 6.946M | 39.046M | 1.757M | $34.20 |
+| 2 visual references/class | 7.093M | 78.142M | 1.784M | $44.43 |
+| 10 visual references/class | 8.695M | 354.710M | 1.788M | $116.79 |
+
+The formula is `(uncached input × $2 + cache-hit input × $0.25 + output ×
+$6) / 1M`. The [cache documentation](https://docs.qwencloud.com/developer-guides/text-generation/context-cache)
+confirms that `cached_tokens` is part of the reported input-token total, which
+is how the calculation treats it.
+
+Actual invoices or future reruns can differ because implicit-cache hits are not
+guaranteed, provider prices and promotions can change, and subscription credits
+may alter effective spend. The estimate also excludes 31 failed API attempts
+across 19,850 condition-image tasks that returned no billable-usage metadata;
+most were provider-side image download or content-rejection errors.
+
+Recorded sources: [class names, one, and two references](qwen38-fsod-runs/rf20-three-way-matched-v1/rf20_summary.json),
+[instructions](qwen38-fsod-runs/instruction-study-v2/full-rf20/rf20_summary.json),
+and [ten references](qwen38-fsod-runs/rf20-all-available-explicit-sparse-v1/rf20_summary.json).
+
+</details>
 
 Compared with the repeatability range above, instructions are within noise, one
 and two references are borderline in the RF20 macro, and ten references only
