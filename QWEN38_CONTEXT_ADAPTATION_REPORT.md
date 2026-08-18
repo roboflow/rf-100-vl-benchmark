@@ -42,14 +42,6 @@ so they establish whether those particular gains repeat, not how often gains
 occur. The exact threshold definition and six-run results are in the
 [noise study](QWEN38_LARGE_DATASET_NOISE_RESULT.md).
 
-## Shareable figures
-
-[![Shareable Qwen3.8-Max context-adaptation summary](figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)](figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)
-
-| Visual references helped | Visual references hurt or failed |
-|---|---|
-| [![Examples where visual references helped](figures/qwen38_context_adaptation/shareable_visual_references_helped.png)](figures/qwen38_context_adaptation/shareable_visual_references_helped.png) | [![Examples where visual references hurt or failed](figures/qwen38_context_adaptation/shareable_visual_references_hurt.png)](figures/qwen38_context_adaptation/shareable_visual_references_hurt.png) |
-
 ## Complete RF20 result
 
 Scores are dataset-macro `mAP50–95 / mAP50`.
@@ -296,3 +288,9 @@ The qualitative cards intentionally choose the largest per-image F1@0.5
 improvement or regression within each fixed dataset/class pair so the mechanism
 is visible. They are illustrations, not the statistical evidence; all reported
 claims come from the complete COCO evaluations above.
+
+## Shareable figure downloads
+
+- [Download the headline summary PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)
+- [Download the visual-references-helped examples PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/shareable_visual_references_helped.png)
+- [Download the visual-references-hurt examples PNG](https://raw.githubusercontent.com/roboflow/rf-100-vl-benchmark/main/figures/qwen38_context_adaptation/shareable_visual_references_hurt.png)
