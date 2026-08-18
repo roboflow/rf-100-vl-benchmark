@@ -550,7 +550,7 @@ def draw_scatter(output_root: Path) -> None:
     )
     draw.text(
         (50, 70),
-        "Each point is one complete RF20-VL-FSOD dataset; y-axis is gain over class names only",
+        "Each point is one complete RF20 dataset; y-axis is gain over class names only; ρ: 0 = none, 1 = perfect ranking",
         fill="#475569",
         font=font(20),
     )
@@ -730,9 +730,9 @@ def draw_shareable_summary(output_root: Path) -> None:
         ),
         (
             660,
-            "Noise-confirmed gains",
-            "Paper Parts: +13.43 / +20.07",
-            "Actions: +2.22 / +4.98",
+            "Repeatability calibration",
+            "Baseline noise: 0.49–2.17 / 1.19–3.87",
+            "Paired-gain noise: 0.68–3.17 / 2.58–4.42",
             "#059669",
         ),
         (

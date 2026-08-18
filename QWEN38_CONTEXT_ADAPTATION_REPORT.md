@@ -11,6 +11,37 @@ We evaluated one multi-class request per test image on all 20 RF20-VL-FSOD
 datasets: 3,970 images, reasoning off, temperature 0, fixed seed, normalized
 0–1000 XYXY reference boxes, and COCO `maxDets=500` scoring.
 
+## How to read the scores and noise
+
+Every score pair in this report is `mAP50–95 / mAP50`; higher is better. A
+gain is the prompted score minus the class-names-only score on the same
+dataset.
+
+Temperature 0 and a fixed seed did not make the hosted API deterministic. We
+therefore ran six complete, matched passes on three of the larger datasets and
+measured two kinds of run-to-run variation:
+
+| Dataset | Test images | Names-only score noise | One-reference gain noise |
+|---|---:|---:|---:|
+| Actions | 409 | 0.49 / 1.19 | 0.68 / 2.58 |
+| Paper Parts | 500 | 0.95 / 3.87 | 3.01 / 3.86 |
+| Defect Detection | 188 | 2.17 / 2.89 | 3.17 / 4.42 |
+
+Each value is a conservative repeatability threshold: the larger of the
+observed six-run range and the estimated 95% repeatability limit.
+**Names-only score noise** is how much an unchanged baseline moved between
+runs. **One-reference gain noise** is how much the measured difference between
+the reference and baseline conditions moved; it is the relevant threshold when
+judging a reference gain. Across these datasets, that threshold ranged from
+**0.68–3.17 mAP50–95** and **2.58–4.42 mAP50**.
+
+These values are a calibration range, not a measured RF20-wide noise floor,
+because all 20 datasets were not repeated. The three datasets were initially
+selected because they were relatively large and had positive reference gains,
+so they establish whether those particular gains repeat, not how often gains
+occur. The exact threshold definition and six-run results are in the
+[noise study](QWEN38_LARGE_DATASET_NOISE_RESULT.md).
+
 ## Shareable figures
 
 [![Shareable Qwen3.8-Max context-adaptation summary](figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)](figures/qwen38_context_adaptation/shareable_context_adaptation_summary.png)
@@ -31,38 +62,62 @@ Scores are dataset-macro `mAP50–95 / mAP50`.
 | 2 positive visual references/class | 25.14 | 46.55 | +0.77 / +3.01 | $44.43 |
 | 10 positive visual references/class | **25.74** | **47.92** | **+1.37 / +4.38** | $116.79 |
 
-Using the three repeated larger datasets as a noise proxy, instructions are
-within noise, one and two references are borderline in the RF20 macro, and ten
-references reach roughly the upper noise boundary only for mAP50. The global
-average therefore hides the important behavior: **the direction and size of the
-effect depend strongly on the dataset.**
+Compared with the repeatability range above, instructions are within noise, one
+and two references are borderline in the RF20 macro, and ten references only
+approach the upper end of the proxy range for mAP50. The macro average hides the
+main finding: **the direction and size of the effect depend strongly on the
+dataset.**
 
 ![Visual-reference gain versus label insufficiency](figures/qwen38_context_adaptation/label_insufficiency_vs_visual_gain.png)
 
-The score-blind class-name ratings were locked before the instruction study was
-scored. Across datasets, the fraction of under-specified labels strongly
-predicts visual-reference gain:
+## Does label ambiguity predict who benefits?
 
-| Pre-rated dataset property | 1 reference | 2 references | 10 references |
-|---|---:|---:|---:|
-| Fraction of class names judged insufficient | **0.80 / 0.79** | **0.70 / 0.77** | **0.56 / 0.69** |
-| Fraction requiring state or scene context | 0.48 / 0.62 | 0.43 / 0.55 | 0.49 / 0.54 |
+Before the instruction study was scored, we rated each of the 110 class names
+using only the label text. A class was marked **under-specified** when its name
+alone did not clearly identify the intended visual target or annotation
+meaning. For each of the 20 datasets, we then compared:
 
-Values are Spearman correlations with `mAP50–95 / mAP50` gain. Every
-leave-one-dataset-out correlation remains positive. For one reference,
-controlling for class-names-only accuracy, image count, and class count leaves
-correlations of **0.83 / 0.75**.
+1. the fraction of its classes marked under-specified; and
+2. its score gain from visual references.
 
-At class level, the separation is similarly large:
+The exact 110 ratings and criteria are in the locked
+[label-sufficiency file](qwen38-fsod-configs/rf20-label-sufficiency-ratings.json).
 
-| Visual context | Under-specified classes | Classes with sufficient names | Difference |
-|---|---:|---:|---:|
-| 1 reference | +6.68 / +12.68 | −2.22 / −1.84 | **+8.90 / +14.52** |
-| 10 references | +6.57 / +13.88 | −3.89 / −4.97 | **+10.46 / +18.85** |
+The table reports Spearman rank correlation, where `0` means no ranking
+relationship and `1` means a perfect positive relationship. These are
+correlations, not mAP values.
 
-The mAP50 differences are outside the dataset-clustered 95% intervals. The
-mAP50–95 evidence is weaker, suggesting that references help concept
-recognition more consistently than precise box localization.
+| References per class | Correlation with mAP50–95 gain | Correlation with mAP50 gain | Interpretation |
+|---:|---:|---:|---|
+| 1 | **0.80** | **0.79** | Strong positive relationship |
+| 2 | **0.70** | **0.77** | Strong positive relationship |
+| 10 | **0.56** | **0.69** | Moderate-to-strong positive relationship |
+
+In plain language, datasets containing more unclear or dataset-specific class
+names generally received larger visual-reference gains. The relationship
+remained positive after removing any one dataset, so no single dataset created
+the overall trend. For one reference, it also remained strong after adjusting
+for baseline accuracy, test-image count, and class count: **0.83 mAP50–95 / 0.75
+mAP50**. A narrower rating for labels requiring state or scene context showed
+the same direction but a weaker relationship: **0.48 / 0.62** with one
+reference, **0.43 / 0.55** with two, and **0.49 / 0.54** with ten.
+
+A second analysis grouped the 110 individual classes by the pre-rated label:
+
+| References per class | 47 under-specified classes: average gain | 63 sufficient-name classes: average gain | Gap between groups |
+|---:|---:|---:|---:|
+| 1 | +6.68 / +12.68 | −2.22 / −1.84 | **+8.90 / +14.52** |
+| 10 | +6.57 / +13.88 | −3.89 / −4.97 | **+10.46 / +18.85** |
+
+For example, with one reference the under-specified classes gained an average
+of **6.68 mAP50–95 / 12.68 mAP50**, while classes whose names were already
+sufficient lost **2.22 / 1.84**. The last column is simply the difference
+between those group averages.
+
+The group separation is statistically clear for mAP50 after accounting for
+classes sharing the same dataset. It is not clear for mAP50–95. This suggests
+that references improve recognizing *what* should be detected more consistently
+than they improve precise localization across stricter IoU thresholds.
 
 ## Where visual adaptation helped
 
@@ -138,26 +193,28 @@ ratings themselves were assigned without viewing scores, but the hypothesis was
 motivated by earlier visual-prompt results. A new semantic-control run is needed
 for confirmation.
 
-## Noise and instruction controls
+## What the repeat and instruction controls established
 
-The repeated larger-dataset study confirms that visual gains are real on some
-datasets rather than API variance.
+The six matched passes confirmed that one-reference gains were much larger than
+run-to-run variation on Paper Parts and Actions. Defect Detection stayed
+positive, but its one-reference gain remained within the paired-gain noise
+threshold shown at the beginning of this report.
 
-| Dataset | Measured names-only noise | Instructions | 1 reference after repeats | 2 references | 10 references |
-|---|---:|---:|---:|---:|---:|
-| Actions | 0.49 / 1.19 | inconclusive / within | **+2.22 / +4.98, outside** | **+2.55 / +5.35, outside** | **+2.02 / +4.57, outside**<sup>†</sup> |
-| Paper Parts | 0.95 / 3.87 | within | **+13.43 / +20.07, outside** | **+9.89 / +16.10, outside** | **+9.73 / +16.13, outside**<sup>†</sup> |
-| Defect Detection | 2.17 / 2.89 | **outside** | +2.03 / +3.60, within paired noise | **+7.40 / +10.97, outside** | **+11.25 / +18.85, outside** |
+| Dataset | Six-run mean one-reference gain | Paired-gain noise | Judgment |
+|---|---:|---:|---|
+| Actions | +2.22 / +4.98 | 0.68 / 2.58 | **Clearly above noise** |
+| Paper Parts | +13.43 / +20.07 | 3.01 / 3.86 | **Clearly above noise** |
+| Defect Detection | +2.03 / +3.60 | 3.17 / 4.42 | Within noise |
 
-<sup>†</sup> Actions and Paper Parts were not independently repeated at exactly ten
-references; those changes exceed names-only noise, while Defect Detection's
-ten-reference result was directly repeated.
+Instructions are not ignored. In a six-dataset control, the correct
+dataset-specific instructions beat instructions shuffled from other classes by
+**+4.38 / +8.25**. The model was therefore using their content, not merely
+reacting to a longer prompt. However, correct instructions still scored
+**−2.97 / −4.13** below class names alone on this matched subset, so they were
+not a reliable universal addition.
 
-Instructions are not ignored. In the six-dataset semantic control, correct
-instructions beat strictly class-shuffled instructions by **+4.38 / +8.25**.
-The strict arm had 12 terminal model-output failures, but the gap remains
-**+4.48 / +8.47** after excluding Actions, which contained 10 of them. Correct
-instructions nevertheless failed as a universal accuracy addition:
+<details>
+<summary><strong>All six-dataset instruction-control scores</strong></summary>
 
 | Six-dataset matched arm | mAP50–95 | mAP50 |
 |---|---:|---:|
@@ -168,11 +225,17 @@ instructions nevertheless failed as a universal accuracy addition:
 | Conservative shuffled instructions | 19.91 | 38.77 |
 | Strictly shuffled instructions | 15.57 | 30.36 |
 
-Ten references are more selectively useful than instructions for
-under-specified classes. Their advantage over instruction gains is
-**+5.79 / +10.43** for insufficient names and **+7.21 / +11.28** for classes
-requiring state or context, with dataset-clustered intervals above zero. The
-same one-reference comparison trends positive but remains within uncertainty.
+The strict shuffled arm had 12 terminal model-output failures, but correct
+instructions still beat it by **+4.48 / +8.47** after excluding Actions, which
+contained 10 of those failures.
+
+</details>
+
+For under-specified classes, the gain from ten visual references exceeded the
+gain from instructions by **+5.79 / +10.43**. For classes requiring state or
+scene context, the advantage was **+7.21 / +11.28**. Both differences remained
+above zero after accounting for classes sharing a dataset. One reference showed
+the same direction, but that comparison was still within uncertainty.
 
 ## Decision
 
@@ -219,6 +282,7 @@ Each cell is `mAP50–95 / mAP50`.
 - Quantitative source: [`qwen38-fsod-runs/instruction-study-v2/analysis/rf20_per_dataset.csv`](qwen38-fsod-runs/instruction-study-v2/analysis/rf20_per_dataset.csv)
 - Class-level source: [`qwen38-fsod-runs/instruction-study-v2/analysis/rf20_per_class.csv`](qwen38-fsod-runs/instruction-study-v2/analysis/rf20_per_class.csv)
 - Noise study: [`QWEN38_LARGE_DATASET_NOISE_RESULT.md`](QWEN38_LARGE_DATASET_NOISE_RESULT.md)
+- Locked class-name ratings: [`qwen38-fsod-configs/rf20-label-sufficiency-ratings.json`](qwen38-fsod-configs/rf20-label-sufficiency-ratings.json)
 - Figure generator: [`analysis/generate_qwen38_context_adaptation_figures.py`](analysis/generate_qwen38_context_adaptation_figures.py)
 - Exact illustrated image/reference IDs: [`figures/qwen38_context_adaptation/selection_manifest.json`](figures/qwen38_context_adaptation/selection_manifest.json)
 
