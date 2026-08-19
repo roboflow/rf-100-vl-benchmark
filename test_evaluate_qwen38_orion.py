@@ -331,6 +331,15 @@ def test_stream_request_sends_temperature_only_when_configured():
     )
     assert client.chat.completions.calls[2]["extra_body"]["enable_thinking"] is True
 
+    qwen.stream_inference(
+        client,
+        messages,
+        {**settings, "response_format": {"type": "json_object"}},
+    )
+    assert client.chat.completions.calls[3]["response_format"] == {
+        "type": "json_object"
+    }
+
 
 def test_streaming_generation_has_a_total_wall_clock_deadline(monkeypatch):
     class Stream:

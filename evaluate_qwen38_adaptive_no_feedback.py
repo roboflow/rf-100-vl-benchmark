@@ -39,7 +39,7 @@ import evaluate_qwen38_recipe as recipe
 
 MODEL_ID = "qwen3.8-max"
 MODE = "adaptive_no_prediction_feedback"
-PROMPT_VERSION = "qwen3.8-max-adaptive-no-prediction-feedback-v1"
+PROMPT_VERSION = "qwen3.8-max-adaptive-no-prediction-feedback-v2"
 TERMINAL_STATUSES = base.TERMINAL_STATUSES
 LOGGER = logging.getLogger("qwen38_adaptive_no_feedback")
 
@@ -67,11 +67,12 @@ def build_tasks(test: dict[str, Any]) -> list[base.Task]:
 def decision_contract(labels: Sequence[str], counts: dict[int, int], categories: dict[int, str]) -> str:
     count_by_label = {categories[category_id]: counts[category_id] for category_id in categories}
     return (
-        "Decide whether the class names and labeled visual examples seen so far "
+        "Return the routing decision as a JSON object and nothing else. Decide "
+        "whether the class names and labeled visual examples seen so far "
         "are sufficient to reliably identify and localize every requested class "
         "in the TARGET IMAGE. Do not output detections yet. If enough context is "
-        "available, return only {\"action\":\"detect\",\"confidence\":0.0}. If "
-        "more visual context is needed, return only "
+        "available, the JSON must be {\"action\":\"detect\",\"confidence\":0.0}. If "
+        "more visual context is needed, the JSON must be "
         "{\"action\":\"request_examples\",\"labels\":[\"exact label\"],"
         "\"confidence\":0.0}. Request only genuinely uncertain labels, but you "
         "may request several labels at once. confidence must be a number from 0 "
@@ -813,7 +814,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tokens-per-minute", type=float, default=1_800_000.0)
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--max-completion-tokens", type=int, default=8192)
-    parser.add_argument("--max-decision-tokens", type=int, default=512)
+    parser.add_argument("--max-decision-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--max-examples-per-class", type=int, default=10)
@@ -899,7 +900,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "vl_high_resolution_images": False,
         "timeout_seconds": args.timeout_seconds,
     }
-    decision_settings = {**settings, "max_completion_tokens": args.max_decision_tokens}
+    decision_settings = {
+        **settings,
+        "max_completion_tokens": args.max_decision_tokens,
+        "response_format": {"type": "json_object"},
+    }
     manifest = {
         "prompt_version": PROMPT_VERSION,
         "mode": MODE,
@@ -919,6 +924,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "common_settings": settings,
         "decision_max_completion_tokens": args.max_decision_tokens,
+        "decision_response_format": {"type": "json_object"},
         "reference_selection": {
             "method": "largest-relative-area-then-greedy-crop-diversity-v1",
             "one_box_per_distinct_train_image": False,

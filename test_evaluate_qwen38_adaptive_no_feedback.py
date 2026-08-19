@@ -138,7 +138,11 @@ def test_adaptive_conversation_requests_one_reference_then_detects(
         references,
         assets,
         settings,
-        {**settings, "max_completion_tokens": 512},
+        {
+            **settings,
+            "max_completion_tokens": 1024,
+            "response_format": {"type": "json_object"},
+        },
         2,
         0,
         object(),
@@ -179,6 +183,7 @@ def test_prepare_only_writes_replayable_manifest_and_does_not_score(tmp_path, pr
     assert policy["prediction_feedback"] is False
     assert policy["test_ground_truth_visible"] is False
     assert policy["reference_box_schema"].startswith("prediction-matched")
+    assert manifest["decision_response_format"] == {"type": "json_object"}
     assert len(manifest["reference_selection"]["classes"]) == len(categories)
     progress = json.loads((output / "progress.json").read_text())
     assert progress["total"]["pending"] == 1

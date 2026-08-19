@@ -19,6 +19,7 @@ def test_adaptive_contract_passes_fresh_official_rf20_fsod():
     assert result["all_references_train_only"]
     assert result["all_reference_payloads_match_prediction_schema"]
     assert result["initial_turn_contains_only_class_names_and_target"]
+    assert result["structured_json_decisions"]
     assert result["prediction_feedback"] is False
     assert result["test_ground_truth_visible"] is False
     assert result["final_detection_only_scored"]

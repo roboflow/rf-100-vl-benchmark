@@ -727,6 +727,9 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
     sampling_parameters = {}
     if settings.get("temperature") is not None:
         sampling_parameters["temperature"] = settings["temperature"]
+    output_parameters = {}
+    if settings.get("response_format") is not None:
+        output_parameters["response_format"] = settings["response_format"]
     reasoning_effort = settings["reasoning_effort"]
     enable_thinking = settings.get(
         "enable_thinking", reasoning_effort != "none"
@@ -739,6 +742,7 @@ def stream_inference(client: Any, messages: list[dict[str, Any]], settings: dict
         seed=settings["seed"],
         max_completion_tokens=settings["max_completion_tokens"],
         **sampling_parameters,
+        **output_parameters,
         extra_body={
             # Keep the established explicit effort while also using
             # DashScope's documented hybrid-model switch. This makes the

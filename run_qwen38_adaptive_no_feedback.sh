@@ -3,19 +3,19 @@ set -euo pipefail
 
 UV_BIN=${UV_BIN:-/home/matveipopov/.local/bin/uv}
 DATASET_ROOT=${DATASET_ROOT:-RF100VL/rf20-vl-fsod-fresh-20260813}
-RUN_ROOT=${RUN_ROOT:-qwen38-fsod-runs/rf20-adaptive-no-feedback-v1}
+RUN_ROOT=${RUN_ROOT:-qwen38-fsod-runs/rf20-adaptive-no-feedback-v2}
 MAX_PASSES=${MAX_PASSES:-6}
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
 SMOKE_ONLY=${SMOKE_ONLY:-0}
 PRIORITY_DATASET=${PRIORITY_DATASET:-}
-SMOKE_ROOT=$RUN_ROOT/_smoke-the-dreidel-project-image-0
+SMOKE_ROOT=$RUN_ROOT/_smoke-actions-image-2
 COMMON=(
   --concurrency 256
   --requests-per-minute 13500
   --tokens-per-minute 1800000
   --timeout-seconds 180
   --max-completion-tokens 8192
-  --max-decision-tokens 512
+  --max-decision-tokens 1024
   --max-examples-per-class 10
   --max-retries 3
   --temperature 0
@@ -64,15 +64,15 @@ fi
 if [[ ! -f "$SMOKE_ROOT/_SUCCESS.json" ]]; then
   "$UV_BIN" run --with-requirements requirements-cosmos.txt \
     python evaluate_qwen38_adaptive_no_feedback.py \
-    --dataset-dir "$DATASET_ROOT/the-dreidel-project" \
+    --dataset-dir "$DATASET_ROOT/actions" \
     --output-dir "$SMOKE_ROOT" \
-    --image-ids 0 \
+    --image-ids 2 \
     --concurrency 1 \
     --requests-per-minute 120 \
     --tokens-per-minute 200000 \
     --timeout-seconds 180 \
     --max-completion-tokens 8192 \
-    --max-decision-tokens 512 \
+    --max-decision-tokens 1024 \
     --max-examples-per-class 10 \
     --max-retries 3 \
     --temperature 0 \
