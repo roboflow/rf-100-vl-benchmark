@@ -57,3 +57,46 @@ validation is still required before treating the router as a locked recipe.
 
 Complete local artifact:
 `qwen38-fsod-runs/paper-parts-strict-binary-router-v1/result.json`.
+
+## Full RF20 routing result
+
+The locked router was then called three times sequentially for every RF20
+dataset using identical temperature-0, seed-1234 settings. Majority vote chose
+between the same two clean saved detector branches. The router received only
+class names; it never received images, predictions, scores, or ground truth.
+
+| Method | Macro mAP50-95 | Macro mAP50 | Estimated total cost |
+|---|---:|---:|---:|
+| Class names only | 24.37 | 43.54 | $22.28 |
+| Fixed one-shot | 25.35 | 46.73 | $34.20 |
+| **Strict binary routing** | **25.55** | **46.91** | **$32.64** |
+
+Strict routing improved over class names by **+1.18 / +3.37**. It exceeded
+fixed one-shot by only +0.20 / +0.18, which is within the measured API noise and
+should be treated as a tie. The routing calls themselves cost $0.064; the
+selected detector branches cost $32.57.
+
+The router selected visual references for 15 datasets and class names for five.
+All three calls agreed on 19/20 datasets. Soda Bottles was the only unstable
+case, with a 2-to-1 majority for class names.
+
+Paper Parts was the development dataset used to refine the conservative prompt.
+Across the other 19 datasets, routing scored 25.42 / 46.53 and improved over
+their class-names baselines by +0.52 / +2.53. Paper Parts therefore accounts for
+a substantial portion of the full RF20 gain.
+
+The router correctly preserved class names on Aerial Airport, Aquarium, FLIR,
+Soda Bottles, and Trail Camera. It captured large reference gains on Defect
+Detection, Orion, Paper Parts, Dreidel, and WB Prova. Important false-positive
+reference decisions remain: All Elements lost 7.59 / 0.65, Global Wheat Head
+lost 2.69 / 3.64, and Water Meter lost 16.55 / 29.58 relative to class names.
+
+The result establishes that strict isolated routing can recover an RF20 uplift
+without the conversational degradation of the earlier adaptive method. It does
+not yet establish a meaningful advantage over always using one reference,
+because the accuracy difference is within noise and the router selected the
+more expensive branch for most datasets.
+
+Complete local artifacts:
+`qwen38-fsod-runs/rf20-strict-binary-router-v1/summary.json` and
+`qwen38-fsod-runs/rf20-strict-binary-router-v1/per_dataset.csv`.
