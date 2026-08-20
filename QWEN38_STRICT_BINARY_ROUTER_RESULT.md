@@ -100,3 +100,11 @@ more expensive branch for most datasets.
 Complete local artifacts:
 `qwen38-fsod-runs/rf20-strict-binary-router-v1/summary.json` and
 `qwen38-fsod-runs/rf20-strict-binary-router-v1/per_dataset.csv`.
+
+## Train-support calibration follow-up
+
+The class-name-only semantic router was subsequently replaced with a direct
+train-only A/B gate using the official RF20-VL-FSOD support objects. On a
+six-dataset diagnostic pilot, this empirical gate corrected all three major
+false-reference decisions above and selected the higher-mAP50-95 branch on all
+6/6 datasets. See [QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md](QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md).
