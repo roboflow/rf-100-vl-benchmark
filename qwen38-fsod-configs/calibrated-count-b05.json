@@ -1,0 +1,15 @@
+{
+  "conditions": [
+    {
+      "mode": "numeric_prediction_b05_multi_explicit_sparse",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "numeric_prediction",
+      "box_count": 5,
+      "reasoning_effort": "none",
+      "seed": 1234,
+      "group_reference_instances_by_image": true,
+      "explicit_sparse_references": true
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "conditions": [
+    {
+      "mode": "names_multi",
+      "formulation": "multi",
+      "semantics": "class_names",
+      "representation": "none",
+      "box_count": 0,
+      "reasoning_effort": "none",
+      "seed": 1234
+    }
+  ]
+}
