@@ -45,6 +45,35 @@ captured 90% of the oracle's available mAP50-95 improvement. The all-20 score is
 descriptive rather than a fully prospective routing estimate because the first
 six datasets were intentionally chosen to contain known successes and failures.
 
+## Accuracy-first extension: route between zero and ten references
+
+The same locked gate can keep its class-names-only decisions but use all ten
+available support objects per class wherever it selects the visual-reference
+branch. Replaying the already completed ten-reference predictions gives:
+
+| Scope | Calibrated 0/1 | Calibrated 0/10 | Delta from using 10 | 0/10 detector cost |
+|---|---:|---:|---:|---:|
+| Held-out 14 | 26.62 / 46.65 | **27.39 / 48.26** | **+0.77 / +1.61** | $18.79 |
+| All 20 | 26.67 / 47.79 | **27.26 / 49.23** | **+0.60 / +1.44** | $92.87 |
+
+Values are mAP50-95 / mAP50. Ten references beat one on five of the eight
+visual-routed datasets and lost on three, so more context does not improve every
+dataset. However, ten references remained better than class names on all eight
+datasets selected by the gate. This supports an accuracy-first 0/10 mode at
+RF20 macro level, not an expectation that every selected dataset improves over
+0/1.
+
+The all-20 selected detector cost rises from $30.38 for 0/1 to $92.87 for 0/10.
+Including the one-time $10.62 calibration makes the 0/10 total $103.49, compared
+with $116.79 for fixed ten-shot on every dataset. The gain over 0/1 is therefore
+modest relative to the additional cost. Use 0/1 for efficiency and 0/10 only
+when measured accuracy is the priority.
+
+This extension is an exact, no-new-inference replay, but it is post-hoc: the
+gate was locked prospectively for choosing class names versus one reference,
+not for choosing class names versus ten. It should be treated as a strong
+follow-up result rather than a new prospective validation.
+
 ## Per-dataset decisions
 
 Support delta is one-shot minus class names using train-only known-object
