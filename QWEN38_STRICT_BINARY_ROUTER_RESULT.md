@@ -104,7 +104,9 @@ Complete local artifacts:
 ## Train-support calibration follow-up
 
 The class-name-only semantic router was subsequently replaced with a direct
-train-only A/B gate using the official RF20-VL-FSOD support objects. On a
-six-dataset diagnostic pilot, this empirical gate corrected all three major
-false-reference decisions above and selected the higher-mAP50-95 branch on all
-6/6 datasets. See [QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md](QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md).
+train-only A/B gate using the official RF20-VL-FSOD support objects. It
+corrected all three major false-reference decisions in a six-dataset diagnostic
+pilot. On the other 14 prospectively held-out datasets, it tied fixed one-shot
+within 0.03 mAP50-95 while selecting references only 5/14 times. The descriptive
+all-20 score was 26.67 / 47.79. See
+[QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md](QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md).
