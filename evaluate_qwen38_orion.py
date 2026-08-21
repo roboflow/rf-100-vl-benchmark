@@ -574,15 +574,43 @@ def load_record(path: Path) -> dict[str, Any] | None:
 
 
 def request_summary(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    content = messages[0]["content"]
-    text_parts = [part["text"] for part in content if part["type"] == "text"]
-    image_digests = []
-    for part in content:
-        if part["type"] != "image_url":
-            continue
-        url = part["image_url"]["url"]
-        image_digests.append(hashlib.sha256(url.encode("utf-8")).hexdigest())
-    return {"text_parts": text_parts, "image_sha256": image_digests}
+    def summarize(message: dict[str, Any]) -> dict[str, Any]:
+        content = message.get("content")
+        if isinstance(content, str):
+            return {
+                "role": message.get("role"),
+                "text_parts": [content],
+                "image_sha256": [],
+            }
+        if not isinstance(content, list):
+            raise TypeError("Message content must be text or a multimodal list.")
+        text_parts = [
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        image_digests = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            url = part["image_url"]["url"]
+            image_digests.append(hashlib.sha256(url.encode("utf-8")).hexdigest())
+        return {
+            "role": message.get("role"),
+            "text_parts": text_parts,
+            "image_sha256": image_digests,
+        }
+
+    turns = [summarize(message) for message in messages]
+    # Preserve the historical fingerprint shape for every existing one-turn
+    # evaluator. Multi-turn experiments need every turn in the fingerprint so
+    # a changed or contaminated trunk can never reuse an old checkpoint.
+    if len(turns) == 1 and turns[0]["role"] == "user":
+        return {
+            "text_parts": turns[0]["text_parts"],
+            "image_sha256": turns[0]["image_sha256"],
+        }
+    return {"turns": turns}
 
 
 def request_fingerprint(task: Task, summary: dict[str, Any], settings: dict[str, Any]) -> str:
