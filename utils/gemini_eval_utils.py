@@ -256,7 +256,10 @@ def convert_coordinates_to_coco_format(boxes, image_id, original_width, original
         label = box.get("label", box.get("class", box.get("name", box.get("class_label", box.get("class_name", "unknown")))))
         
         category_id = None
-        for cat_id, cat_name in categories_dict.items():
+        # Try the most specific (longest) category name first so nested names
+        # do not collide (e.g. a predicted "jellyfish" must not match "fish").
+        for cat_id, cat_name in sorted(categories_dict.items(),
+                                       key=lambda kv: -len(kv[1])):
             if cat_name.lower() in label.lower():
                 category_id = cat_id
                 break
@@ -320,7 +323,10 @@ def visualize_predictions(image_path, boxes, input_width, input_height,
         label_text = box.get("label", box.get("class", box.get("name", box.get("class_label", box.get("class_name", "unknown")))))
         
         category_id = None
-        for cat_id, cat_name in categories_dict.items():
+        # Try the most specific (longest) category name first so nested names
+        # do not collide (e.g. a predicted "jellyfish" must not match "fish").
+        for cat_id, cat_name in sorted(categories_dict.items(),
+                                       key=lambda kv: -len(kv[1])):
             if cat_name.lower() in label_text.lower():
                 category_id = cat_id
                 break
