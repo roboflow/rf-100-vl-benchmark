@@ -11,6 +11,7 @@ JUDGE_MODEL_REVISION=${JUDGE_MODEL_REVISION:-b5c939de8f754692c1647ca79fbf85e8c1e
 VLLM_IMAGE=${VLLM_IMAGE:-vllm/vllm-openai@sha256:14ea8b431aaaf75eb873c46c8ebfbad2b4b0790d30c66126d789d8cb9bd0aab9}
 JUDGE_STATE_DIR=${JUDGE_STATE_DIR:-$RUN_ROOT/gpt-oss-120b-judge-v1}
 QUEUE_LOG=${QUEUE_LOG:-$JUDGE_STATE_DIR/judge-queue.log}
+RUNPOD_LAUNCH_ATTEMPTS=${RUNPOD_LAUNCH_ATTEMPTS:-120}
 
 cd "$REPO_DIR"
 mkdir -p "$JUDGE_STATE_DIR"
@@ -103,10 +104,19 @@ print(json.dumps({
 PY
   )
   echo "[$(date -u +%FT%TZ)] launching one dedicated H100 judge pod"
-  response=$(rp POST /pods "$body")
-  pod_id=$(printf '%s' "$response" | jq -r '.id // empty')
+  response=""
+  for launch_attempt in $(seq 1 "$RUNPOD_LAUNCH_ATTEMPTS"); do
+    if response=$(rp POST /pods "$body" 2>/dev/null); then
+      pod_id=$(printf '%s' "$response" | jq -r '.id // empty')
+      if [[ -n "$pod_id" ]]; then
+        break
+      fi
+    fi
+    echo "[$(date -u +%FT%TZ)] RunPod launch attempt $launch_attempt/$RUNPOD_LAUNCH_ATTEMPTS did not allocate an H100; retrying in 30 seconds"
+    sleep 30
+  done
   if [[ -z "$pod_id" ]]; then
-    echo "RunPod did not return a pod ID." >&2
+    echo "RunPod did not return a pod ID after $RUNPOD_LAUNCH_ATTEMPTS attempts." >&2
     exit 2
   fi
   printf '%s' "$pod_id" >"$JUDGE_STATE_DIR/pod-id"
