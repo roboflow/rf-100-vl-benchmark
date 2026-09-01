@@ -12,6 +12,7 @@ VLLM_IMAGE=${VLLM_IMAGE:-vllm/vllm-openai@sha256:14ea8b431aaaf75eb873c46c8ebfbad
 JUDGE_STATE_DIR=${JUDGE_STATE_DIR:-$RUN_ROOT/gpt-oss-120b-judge-v1}
 QUEUE_LOG=${QUEUE_LOG:-$JUDGE_STATE_DIR/judge-queue.log}
 RUNPOD_LAUNCH_ATTEMPTS=${RUNPOD_LAUNCH_ATTEMPTS:-120}
+JUDGE_READY_ATTEMPTS=${JUDGE_READY_ATTEMPTS:-360}
 MODELS_CSV=${MODELS_CSV:-qwen3.8-flash,qwen3.8-max}
 POD_NAME=${POD_NAME:-perceptionbench-gpt-oss-120b-judge}
 COMPLETION_MARKER=${COMPLETION_MARKER:-_QWEN38_MAX_FLASH_EVALUATION_COMPLETE}
@@ -150,7 +151,7 @@ fi
 judge_base_url="https://$pod_id-8000.proxy.runpod.net/v1"
 echo "[$(date -u +%FT%TZ)] waiting for the pinned judge server"
 ready=0
-for _ in $(seq 1 180); do
+for _ in $(seq 1 "$JUDGE_READY_ATTEMPTS"); do
   if curl -fsS --config "$judge_curl_config" --max-time 15 \
     "$judge_base_url/models" \
     | jq -e --arg model "$JUDGE_MODEL" '.data[] | select(.id == $model)' >/dev/null 2>&1; then
@@ -160,7 +161,8 @@ for _ in $(seq 1 180); do
   sleep 10
 done
 if [[ "$ready" != "1" ]]; then
-  echo "Pinned gpt-oss-120b judge did not become ready within 30 minutes." >&2
+  ready_minutes=$((JUDGE_READY_ATTEMPTS * 10 / 60))
+  echo "Pinned gpt-oss-120b judge did not become ready within $ready_minutes minutes." >&2
   exit 3
 fi
 
