@@ -75,10 +75,13 @@ The Qwen API key is read only from `DASHSCOPE_API_KEY` or the existing secure,
 gitignored local loader. It is never written to manifests, commands, logs, or
 Git.
 
-Judging requires a separate OpenAI-compatible endpoint serving the paper's
-exact `gpt-oss-120b` model. The Qwen prediction queue can finish without it,
-but the runner will not substitute another judge and will not label a partial
-or differently judged result paper-comparable.
+Judging uses a separate OpenAI-compatible vLLM endpoint serving the paper's
+exact `openai/gpt-oss-120b` weights at pinned revision
+`b5c939de8f754692c1647ca79fbf85e8c1e70f8a`. The delayed judge queue rents one
+H100 only after both prediction arms finish, applies the exact released prompt
+at temperature 0.3, scores both models, and terminates only the pod it created.
+The vLLM container is pinned by digest. It will not substitute another judge or
+label a partial result paper-comparable.
 
 ## Canonical sources
 
