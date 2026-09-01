@@ -1,7 +1,7 @@
 # Qwen3.8-Max RF100-VL/FSOD research log
 
-Canonical status: completed, append-only research record
-Last evidence snapshot: 2026-08-12 09:00 UTC
+Canonical status: current, append-only research record; no Qwen run active
+Last evidence snapshot: 2026-09-01 UTC
 Model/API: `qwen3.8-max` through DashScope International's OpenAI-compatible endpoint
 
 This document is the source of truth for the Qwen3.8-Max object-detection and
@@ -13,9 +13,11 @@ Machine-readable run artifacts remain authoritative for exact values. When
 this document and an artifact disagree, verify the artifact, correct this log,
 and record the correction in the change log.
 
-The final step-by-step selection rationale, including every evaluated decision
-axis and the limits of the conclusion, is in
-`QWEN38_FINAL_RECIPE_DECISION.md`.
+This file is the single entry point for a new agent. Sections 0-12 preserve the
+original chronological prompt study. Sections 13-19 continue through the full
+RF20 context, routing, self-consistency, and confidence-free F1 studies. The
+older `research/QWEN38_NEXT_AGENT_HANDOFF.md` is a historical August 24
+snapshot and is superseded by this file.
 
 ## How to interpret this log
 
@@ -70,32 +72,82 @@ Dataset shapes used so far:
 
 ## Current evidence summary
 
-The adaptive study completed at 2026-08-12 09:00 UTC. Its selected shared
-accuracy recipe is one multi-class request per target, real class names, two
-positive numeric-box train references per class, and no reasoning. The locked
-Dreidel/Orion macro is **35.00 / 58.58**.
+Scope matters: the prompt/adaptation study covers the complete official
+**RF20-VL-FSOD subset**, 20 datasets and 3,970 test images. It is not a
+few-shot study over the other 80 RF100-VL datasets.
 
-Final conclusions:
+There are now two legitimate score views:
 
-1. Positive box references provide a material shared accuracy gain, but the
-   optimal count is not monotonic. Two is the selected noise-aware efficiency
-   point.
-2. Numeric and drawn references tie on Dreidel in the locked comparison;
-   numeric is materially stronger on Orion and is selected.
-3. Multi- versus single-class formulation is dataset-dependent. Dreidel
-   strongly favors multi-class while Orion's complete screen favors
-   single-class. Multi-class is the shared macro/efficiency choice, not a
-   universal per-dataset winner.
-4. Low reasoning failed the locked two-dataset gate, more than doubled latency,
-   and was not advanced to medium.
-5. Explicit anonymous box transfer works, but loses heavily to real class
-   names. Minimal box-only prompts, self-generated names, and negative examples
-   do not justify inclusion in the final recipe.
-6. Residual output variance remains substantial at temperature zero and fixed
-   seed. The operational mAP tie thresholds are 3.31 on Dreidel and 4.92 on
-   Orion.
-7. Class names only remain the cost-first alternative: they use about one
-   tenth the tokens but score **30.99 / 45.63** on the locked macro.
+- **RF100-VL/paper continuity:** pycocotools mAP50-95 and mAP50 with
+  `maxDets=[1,10,500]`.
+- **Current confidence-free primary:** the exact released Rex-Omni FastEval
+  `F1@mIoU`, which assigns every generative box confidence 0.2, uses COCO IoU
+  0.50:0.05:0.95, `maxDets=100`, averages class precision and recall with the
+  official positive-only `safe_mean`, and then takes their harmonic mean.
+
+The second metric supersedes our earlier approximate `mF1@[.50:.95]`
+implementation for current method selection. The earlier numbers are retained
+only as a documented intermediate analysis.
+
+### Current RF20 ranking
+
+All values are equal-weight macros across the same 20 datasets. “Three
+candidates” means one API request per image with `n=3`, followed by class-aware
+IoU-0.5 hard consensus. Calibration never uses the ground truth of the test
+image being scored.
+
+| Method | Rex F1@mIoU | F1@50 | mAP50-95 | mAP50 | Inference |
+|---|---:|---:|---:|---:|---|
+| **Support-selected 0/10-shot, 2-of-3 consensus** | **41.84** | **65.18** | **30.30** | **54.12** | 1 request, 3 candidates |
+| Validation-selected 0/1/10-shot, 2-of-3 consensus | 41.43 | 65.07 | 30.28 | 54.03 | 1 request, 3 candidates |
+| Validation-selected augmented cross-mode | 40.91 | 63.63 | 27.31 | 48.33 | Multiple branches |
+| Validation-selected 0/1/2/5/10-shot | 40.86 | 64.65 | 27.43 | 50.63 | 1 selected mode |
+| Cross-mode 0+1 consensus only | 39.73 | 61.41 | 26.71 | 46.01 | 2 requests |
+| Class names only | 39.19 | 60.12 | 24.37 | 43.54 | 1 request |
+| Fixed 1-shot | 39.01 | 61.63 | 25.35 | 46.73 | 1 request |
+| Cross-mode 0+1 union | 38.97 | 60.13 | **31.16** | 54.04 | 2 requests |
+| Fixed 10-shot | 38.95 | 62.42 | 25.74 | 47.92 | 1 expensive request |
+
+Current recommendations:
+
+1. **Confidence-free accuracy:** use the support-selected dataset-wide 0/10
+   route with 2-of-3 candidate consensus. It is the current measured champion.
+2. **Simplest cost baseline:** use one class-names-only multi-class request.
+3. **Simple visual-context tradeoff:** use fixed 1-shot. Ten-shot has the
+   highest fixed mAP but its small average advantage is not worth its much
+   larger prompt cost unless dataset-specific appearance is known to matter.
+4. **mAP-only accuracy:** cross-mode 0+1 union reaches the highest mAP50-95,
+   but it loses under confidence-free F1 because union raises recall while
+   admitting too many unsupported boxes.
+
+Stable findings across the full program:
+
+- Positive numeric references use the same normalized 0-1000 XYXY
+  `bbox_2d`+`label` format as predictions and outperform drawn references in
+  the best matched screens.
+- Visual examples behave like dataset adaptation: they help under-specified,
+  state-dependent, and dataset-specific labels, but can hurt familiar objects.
+- Multi- versus single-class prompting is dataset-dependent. One multi-class
+  call is the shared efficiency default.
+- Reasoning is more than twice as slow in matched screens and did not produce a
+  noise-clearing detection gain. Keep it off for RF20 object detection.
+- Negative examples, anonymous/minimal box-only transfer, self-generated names,
+  universal annotator instructions, and mixed per-class reference counts inside
+  one prompt did not improve the final recipe.
+- Temperature zero and a fixed seed do not make the hosted API deterministic;
+  measured fixed-test variability must remain part of interpretation.
+- Per-class test-fold calibration demonstrated headroom (28.21 / 51.00 mAP),
+  but is not an untouched-test result. Sparse support and ordinary validation
+  did not recover that headroom in a clean mixed prompt.
+- Progressive multi-turn shot acquisition can stop early relative to its own
+  endpoint, but conversation anchoring made that endpoint worse and the
+  trajectory more expensive than one clean request.
+- Same-prompt candidate diversity is useful. Hard vote filtering improves the
+  confidence-free metric; soft vote confidence/coordinate fusion mainly helps
+  mAP ranking.
+- Increasing consensus from n=3 to n=4/n=5 and adding a model adjudicator did
+  not clear predeclared gates. The bounded simple TTS search is complete rather
+  than still queued.
 
 ## Chronological experiment record
 
@@ -557,12 +609,222 @@ were:
 | Class names only | 43.22 / 57.50 | **18.77 / 33.76** | 30.99 / 45.63 | 0 |
 | Anonymous explicit + numeric boxes x2 | 36.47 / 60.68 | 2.56 / 8.54 | 19.51 / 34.61 | 21 |
 
-The selected accuracy recipe is class names plus two numeric references per
-class in one multi-class request, with no reasoning. Class names only are the
-cost-first alternative because they use 1,816 rather than 18,797 tokens per
-image.
+The selected accuracy recipe at this stage was class names plus two numeric
+references per class in one multi-class request, with no reasoning. Class names
+only were the cost-first alternative because they used 1,816 rather than
+18,797 tokens per image. This was an important two-dataset interim decision,
+not the final RF20 recommendation; Sections 13-19 supersede it.
+
+### 13. Full RF20 fixed-context and instruction study
+
+Status: **Completed**
+Dates: 2026-08-13 to 2026-08-18
+Reports: `QWEN38_RF20_FSOD_RESULT.md`,
+`QWEN38_CONTEXT_ADAPTATION_REPORT.md`
+
+The prompt was standardized to one multi-class request per test image, real
+class names, numeric reference objects in the same
+`{"bbox_2d":[x1,y1,x2,y2],"label":"class"}` format as predictions, explicit
+sparse-annotation wording, no reasoning, temperature zero, and seed 1234.
+References came only from RF20-VL-FSOD train/support; test annotations were
+never shown to the model.
+
+| Fixed context | mAP50-95 / mAP50 | Recorded list-price estimate |
+|---|---:|---:|
+| Class names | 24.37 / 43.54 | $22.28 |
+| Annotator instructions | 24.46 / 44.58 | $26.21 |
+| 1 positive numeric reference/class | 25.35 / 46.73 | $34.20 |
+| 10 positive numeric references/class | **25.74 / 47.92** | $116.79 |
+
+Ten-shot was the highest fixed mAP point estimate, but only +0.39 / +1.20 over
+one-shot and much more expensive. The more meaningful result was
+heterogeneity: references helped labels whose text under-specified appearance,
+state, role, or annotation semantics and often hurt already-familiar labels.
+
+| Score-blind class-name group | 1-shot gain | 10-shot gain |
+|---|---:|---:|
+| Under-specified classes | +6.68 / +12.68 | +6.57 / +13.88 |
+| Sufficient class names | -2.22 / -1.84 | -3.89 / -4.97 |
+| Datasets with every label under-specified | +6.82 / +13.57 | **+10.20 / +19.43** |
+
+Correct instructions beat shuffled instructions on the matched control, so the
+model used their content, but instructions did not improve RF20 reliably and
+did not stack consistently with references. Visual support transferred
+dataset-specific appearance better.
+
+### 14. API variance and larger-dataset noise
+
+Status: **Completed**
+Report: `QWEN38_LARGE_DATASET_NOISE_RESULT.md`
+
+Identical requests were repeated with temperature zero, fixed seed, identical
+prompts, and no reasoning. The hosted endpoint remained nondeterministic.
+
+| Dataset | Names-only noise, mAP50-95 / mAP50 | 1-shot gain noise |
+|---|---:|---:|
+| Actions, 409 test images | 0.49 / 1.19 | 0.68 / 2.58 |
+| Paper Parts, 500 | 0.95 / 3.87 | 3.01 / 3.86 |
+| Defect Detection, 188 | 2.17 / 2.89 | 3.17 / 4.42 |
+
+Earlier small-set operational tie thresholds were 3.31 mAP on Dreidel and 4.92
+on Orion. Larger datasets generally reduced names-only variation, but not
+uniformly; method-delta noise can still be larger than raw score noise. These
+are repeatability thresholds for those datasets, not a universal RF20
+confidence interval.
+
+### 15. Dataset routing and failed self-routing
+
+Status: **Completed**
+Reports: `QWEN38_STRICT_BINARY_ROUTER_RESULT.md`,
+`QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md`,
+`QWEN38_PER_IMAGE_ROUTER_RESULT.md`
+
+The robust routing win was deliberately simple. Reserve one support object per
+class, compare names and 1-shot on the remaining sparse support annotations
+using known-object recall, make one dataset-wide decision, then issue one clean
+test request from the selected branch.
+
+| Deployable route | mAP50-95 / mAP50 | Selected detector cost |
+|---|---:|---:|
+| Support-selected 0/1 | 26.67 / 47.79 | $30.38 |
+| Same support decision replayed as 0/10 | **27.26 / 49.23** | $92.87 |
+| Dataset 0/10 test oracle | 27.95 / 50.91 | upper bound only |
+
+A separate per-image model call that saw the target, names-only prediction, and
+dataset prior did not improve the prior. On 2,209 held-out images it was -0.21 /
+-0.23 mAP below the dataset route and added $8.02. Low and medium reasoning
+made routing decisions worse. Asking the model to state confidence was not a
+reliable gate.
+
+### 16. Progressive support acquisition and per-class routing
+
+Status: **Completed**
+Reports: `QWEN38_PROGRESSIVE_TTS_RESULT.md`,
+`QWEN38_SSA_THREE_DATASET_RESULT.md`,
+`QWEN38_PER_CLASS_ZERO_TEN_RESULT.md`
+
+The 0/1/2/5/10 multi-turn trajectory stopped after two consecutive stable
+box-agreement transitions. It reproduced its own endpoint at 56% lower
+trajectory cost, showing that box agreement can be a label-free stopping
+signal. It did not beat established clean prompts: carrying prior predictions
+forward anchored later responses, degraded the endpoint, and made the whole
+trajectory more expensive than one standalone request.
+
+Per-class output splicing showed genuine but difficult-to-deploy headroom:
+
+| Per-class/dataset analysis | mAP50-95 / mAP50 | Validity |
+|---|---:|---|
+| Dataset-wide support-selected 0/10 | 27.26 / 49.23 | deployable |
+| Validation-selected per-class 0/1/10 splice | 26.92 / 49.46 | clean analysis, not one prompt |
+| Five-fold per-class test cross-fit, mean | **28.21 / 51.00** | analysis only |
+| Per-class test oracle | 28.82 / 51.84 | upper bound only |
+
+The cross-fit never used an image's own ground truth for its route, but other
+test folds did, so it is not an official untouched-test score. A real one-call
+mixed 0/1/10 prompt was then completed and scored **25.05 / 46.87** at an
+estimated **$54.99**, below fixed one-shot and far below routed output splicing.
+Cross-class prompt interference therefore defeats the apparent compositional
+headroom. Grouped per-class follow-ups were stopped rather than expanding a
+costly heuristic search.
+
+### 17. Same-prompt self-consistency and cross-mode fusion
+
+Status: **Completed**
+Artifacts: `analysis/qwen38-self-ensemble-rf20-v1/`,
+`analysis/qwen38-self-ensemble-policy-comparison-v1/`,
+`analysis/qwen38-cross-mode-zero-one-consensus-v1/`
+
+One API request asked for three independent candidates from the selected
+dataset-wide prompt. Boxes were clustered within class at IoU 0.5, with at
+most one box per candidate in a cluster. Soft fusion retained singletons and
+used vote fraction as confidence; hard consensus kept only boxes with at least
+two votes.
+
+| n=3 prompt policy | Candidate mean mAP | Soft-fused mAP | Hard-consensus mAP |
+|---|---:|---:|---:|
+| Class names | 24.54 / 43.92 | 27.78 / 49.06 | 27.16 / 47.90 |
+| Fixed 1-shot | 25.46 / 46.76 | 28.85 / 51.42 | 28.33 / 50.20 |
+| Support-selected 0/1 | 26.76 / 47.97 | 30.35 / 53.47 | 29.74 / 52.19 |
+| Support-selected 0/10 | 27.30 / 49.55 | **30.87 / 55.36** | 30.30 / 54.12 |
+
+Soft fusion improved mAP on all 20 routed 0/10 datasets by +3.56 / +5.81 over
+the three standalone candidate mean. A separate, free 0+1 cross-mode union
+reached **31.16 / 54.04 mAP**, the highest saved mAP50-95 result, because
+candidate agreement created useful confidence ordering and coordinate
+averaging. The same behavior did not translate directly to confidence-free F1.
+
+The n=2-to-n=3 disagreement gate was simulated from saved candidates. Its best
+threshold was effectively tied with always stopping at n=2 under F1, so it did
+not establish useful adaptive compute scaling.
+
+### 18. Confidence-free metric correction and re-evaluation
+
+Status: **Completed**
+Artifacts: `qwen38_rex_omni_f1.py`,
+`analysis/qwen38-rex-omni-f1-v1/`,
+`analysis/qwen38-rex-paid-champions-v1/`
+
+The first F1 implementation computed F1 separately at each IoU threshold and
+averaged those values. That was reasonable but was not byte-for-byte the
+published Rex-Omni evaluator. We therefore pinned Rex-Omni commit
+`6508981c1e0c3fbb2dbe7b962a4bb745005f3e2e` and reproduced its actual FastEval
+path: fixed confidence 0.2, COCO IoU 0.50:0.05:0.95, `maxDets=100`, official
+positive-only class means for precision and recall, then their harmonic mean.
+All current F1 conclusions use this exact `F1@mIoU` implementation.
+
+Why rankings changed:
+
+- mAP rewards useful confidence ranking. Soft vote fusion ranks repeated boxes
+  above singletons, so unions can score well despite extra false positives.
+- Rex F1 ignores that ranking because every emitted box has the same score.
+  Unsupported union boxes directly reduce precision, so 2-of-3 hard consensus
+  becomes the right fusion rule.
+- Dataset-level validation selection transfers better than per-class
+  validation because class validation sets are sparse and noisy.
+
+The current complete ranking is at the top of this document and in
+`analysis/qwen38-rex-paid-champions-v1/ranking.csv`.
+
+### 19. Bounded final test-time-scaling sequence
+
+Status: **Completed; stop gate reached**
+Artifacts: `analysis/qwen38-rex-n4-validation-v1/`,
+`analysis/qwen38-rex-n5-pilot-v1/`,
+`analysis/qwen38-n3-adjudicator-pilot-v1/`
+
+We tested the remaining simple knobs without opening another feature search:
+
+1. **More candidates:** n=4 with 3-of-4 improved validation F1@mIoU only +0.41
+   over paired n=3, won 11/20 datasets, and failed the predeclared +0.5 and
+   12/20 gate. On the three-dataset n=5 pilot, n=4 2-of-4 was only +0.17 and
+   n=5 3-of-5 was -0.21 versus n=3.
+2. **Model adjudication:** a separate call saw n=3 candidates and selected or
+   repaired boxes. No-reasoning was -1.20 F1 and low reasoning was -0.54 across
+   Dreidel, Orion, and Lacrosse. It failed the +1.0 and 2/3-dataset gate and was
+   much more expensive.
+3. **Shot-grid validation:** choosing among 0/1/2/5/10 improved on fixed modes
+   but remained below n=3 hard consensus. More reference-count choices did not
+   unlock a new result.
+
+Conclusion: the simplest successful inference-time scaling primitive is
+same-prompt candidate consensus. The next candidate, if the project resumes,
+should introduce genuinely new information rather than more candidates,
+reasoning, confidence prompts, or mixed reference heuristics. No Qwen
+experiment is currently running.
 
 ## Locked decision rules for future conclusions
+
+### Evaluation metrics
+
+- Use the released Rex-Omni `F1@mIoU` implementation as the primary metric for
+  confidence-free generative detection. Also report `F1@50`.
+- Continue reporting pycocotools mAP50-95 and mAP50 with
+  `maxDets=[1,10,500]` for RF100-VL/paper continuity and for diagnosing
+  confidence-ranking effects.
+- Do not call the earlier mean-of-per-IoU-F1 calculation “Rex F1.” It is an
+  intermediate metric and is superseded by `qwen38_rex_omni_f1.py`.
+- Select routes, thresholds, and consensus rules on support or validation
+  only. Test annotations may score a frozen policy but may not choose it.
 
 ### Residual API noise
 
@@ -595,21 +857,16 @@ if low passes. Do not test higher levels otherwise.
 
 ### Final recipe selection
 
-Primary metric: equal-weight macro mAP50-95 across complete Dreidel and Orion.
+Primary evidence is equal-weight macro exact Rex `F1@mIoU` across all 20
+RF20-VL-FSOD datasets. Per-dataset Rex F1, F1@50, mAP50-95, mAP50, calls,
+latency, tokens, estimated list-price cost, and failure rates are secondary
+evidence. Within measured noise, prefer the cheaper and simpler method.
 
-Secondary evidence:
-
-- Per-dataset mAP50-95 and mAP50.
-- Calls per image.
-- Mean latency and effective latency per image.
-- Input/output/reasoning tokens and estimated cost.
-- Model-format and timeout failure rates.
-- Rank consistency across datasets.
-
-Within measured noise, efficiency is the first tie-breaker. If accuracy remains
-materially different after inference noise and finite-image uncertainty, select
-the higher-accuracy recipe provided it does not collapse on either dataset.
-Report separate accuracy-first and throughput-first recipes when warranted.
+The current locked confidence-free champion is dataset-wide support-selected
+0/10-shot prompting with one request returning three candidates and 2-of-3
+hard consensus. The simplest baseline remains one class-names-only request.
+Do not reopen this choice using the same test set unless a predeclared method
+introduces genuinely new information and is selected without test leakage.
 
 ### Language for general trends
 
@@ -625,21 +882,19 @@ Report separate accuracy-first and throughput-first recipes when warranted.
 
 ## Open research questions and experiment queue
 
-| Question | Current evidence | Next resolving experiment |
-|---|---|---|
-| Single vs multi-class | Dataset-dependent reversal; multi is the shared macro/efficiency choice, but single was not a locked finalist | Optional locked three-arm replication on a new dataset |
-| Reasoning level | Resolved for current recipe family: low failed the locked gate, medium skipped | None unless model/provider behavior changes |
-| Number of examples | Two selected for shared noise-aware efficiency; one remains plausible for Orion alone | Optional new-dataset replication of one versus two |
-| Numeric vs drawn | Locked numeric winner: tied on Dreidel, materially stronger on Orion | None for current recipe |
-| Explicit vs minimal anonymous | Resolved on Dreidel: explicit is consistently stronger | Replicate only if anonymous prompting becomes a product requirement |
-| Anonymous single vs multi | Both completed on Dreidel; multi has higher point estimates but settings differ | Locked matched comparison only if names cannot be supplied |
-| Self-generated names | Resolved for current setting: did not advance | None while real names are available |
-| Positive vs positive/negative | Positive-only selected; negatives gave no consistent gain | None unless a new domain supplies meaningful counterexamples |
-| Generalization | Locked decision covers Dreidel and Orion; earlier Lacrosse evidence supports one-call prompting but rankings vary | One preselected locked external dataset with three minimal arms |
+The RF20 prompt and test-time-scaling search is currently stopped, not merely
+paused. The bounded n=4/n=5 and adjudication gates failed. Avoid reopening
+reasoning, confidence self-reports, mixed per-class reference counts, wider
+shot grids, anonymous prompts, negative examples, or more same-information
+candidates without new evidence.
 
-Avoid reopening the broad factorial. New work should start with the smallest
-experiment that tests external validity of the selected recipe and the known
-single-versus-multi interaction.
+If this project resumes, the clean next experiment must add genuinely new
+information while preserving the locked protocol. Examples are deterministic
+test-time image transformations with exact coordinate inversion, or validation
+on a new benchmark/model. Predeclare one global rule, tune it on support or
+validation, score test once, and include a stop gate. Per-class cross-fitted
+and oracle scores remain useful headroom estimates but are not official test
+scores.
 
 ## Artifact index
 
@@ -661,6 +916,20 @@ single-versus-multi interaction.
 | Adaptive final study | `qwen38-fsod-runs/final-recipe-study/` |
 | Final recipe report | `qwen38-fsod-runs/final-recipe-study/final-analysis/` |
 | Final decision rationale | `QWEN38_FINAL_RECIPE_DECISION.md` |
+| Full RF20 fixed 0/1/10-shot predictions | `qwen38-fsod-runs/rf20-three-way-matched-v1/`, `qwen38-fsod-runs/rf20-all-available-explicit-sparse-v1/` |
+| Context-adaptation report and examples | `QWEN38_CONTEXT_ADAPTATION_REPORT.md` |
+| Larger-dataset API noise | `QWEN38_LARGE_DATASET_NOISE_RESULT.md`, `qwen38-fsod-runs/large-dataset-noise-v1/` |
+| Dataset-level support router | `QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md`, `qwen38-fsod-runs/support-calibrated-zero-ten-fresh-v1/` |
+| Progressive trajectory | `QWEN38_PROGRESSIVE_TTS_RESULT.md`, `qwen38-fsod-runs/rf20-progressive-consistency-online-v1/` |
+| Per-class routing headroom | `QWEN38_PER_CLASS_ZERO_TEN_RESULT.md`, `analysis/per-class-zero-ten-crossfit-seed1235-v1/`, `analysis/per-class-zero-one-ten-validation-v1/` |
+| Actual mixed per-class prompt | `qwen38-fsod-runs/rf20-validation-routed-zero-one-ten-mixed-v1/` |
+| n=3 candidate self-consistency | `analysis/qwen38-self-ensemble-rf20-v1/`, `qwen38-fsod-runs/rf20-self-ensemble-n3-router-v1/` |
+| Cross-mode 0+1 fusion | `analysis/qwen38-cross-mode-zero-one-consensus-v1/` |
+| Exact Rex-Omni F1 implementation | `qwen38_rex_omni_f1.py`, `analysis/qwen38-rex-omni-f1-v1/` |
+| Exact Rex champion ranking | `analysis/qwen38-rex-paid-champions-v1/` |
+| Final n=4 validation | `analysis/qwen38-rex-n4-validation-v1/` |
+| Final n=5 pilot | `analysis/qwen38-rex-n5-pilot-v1/` |
+| Candidate adjudication pilot | `analysis/qwen38-n3-adjudicator-pilot-v1/` |
 
 Existing focused documents remain useful supporting notes:
 
@@ -668,6 +937,15 @@ Existing focused documents remain useful supporting notes:
 - `QWEN38_ORION_SUBSET_RESULTS.md`
 - `QWEN38_CROSS_DATASET_VALIDATION.md`
 - `QWEN38_BOX_COUNT_ABLATION.md`
+- `QWEN38_PROMPT_RESEARCH_JOURNEY.md`
+- `QWEN38_RF20_FSOD_RESULT.md`
+- `QWEN38_SUPPORT_CALIBRATED_ROUTER_RESULT.md`
+- `QWEN38_PROGRESSIVE_TTS_RESULT.md`
+- `QWEN38_PER_CLASS_ZERO_TEN_RESULT.md`
+
+`QWEN38_F1_REEVALUATION_RESULT.md` records the earlier approximate F1 pass.
+It is intentionally retained for history but must not be used for current Rex
+comparisons.
 
 ## Update protocol
 
@@ -686,6 +964,11 @@ When a stage completes:
 
 ## Change log
 
+- **2026-09-01:** Consolidated the full RF20 context, routing,
+  self-consistency, exact Rex-Omni F1, n=4/n=5, and adjudication results into
+  this canonical log. Marked the August 24 handoff and approximate F1 report as
+  superseded, recorded the final confidence-free champion, and closed the
+  bounded prompt/test-time-scaling search.
 - **2026-08-12:** Completed the adaptive study, measured ten-repeat noise floors,
   finished anonymous and self-name screens, applied the reasoning gate, ran
   locked finalists on Dreidel and Orion, generated bootstrap evidence, and

@@ -23,3 +23,7 @@ __pycache__/
 # Resumable Qwen3.8-Max RF20-VL-FSOD prompt-mode experiments
 /qwen38-orion-runs/
 /qwen38-fsod-runs/
+
+# Pinned PerceptionBench data/upstream evaluator and resumable API outputs
+/PerceptionBench/
+/perceptionbench-runs/
