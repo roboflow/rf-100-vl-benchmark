@@ -12,6 +12,24 @@ VLLM_IMAGE=${VLLM_IMAGE:-vllm/vllm-openai@sha256:14ea8b431aaaf75eb873c46c8ebfbad
 JUDGE_STATE_DIR=${JUDGE_STATE_DIR:-$RUN_ROOT/gpt-oss-120b-judge-v1}
 QUEUE_LOG=${QUEUE_LOG:-$JUDGE_STATE_DIR/judge-queue.log}
 RUNPOD_LAUNCH_ATTEMPTS=${RUNPOD_LAUNCH_ATTEMPTS:-120}
+MODELS_CSV=${MODELS_CSV:-qwen3.8-flash,qwen3.8-max}
+POD_NAME=${POD_NAME:-perceptionbench-gpt-oss-120b-judge}
+COMPLETION_MARKER=${COMPLETION_MARKER:-_QWEN38_MAX_FLASH_EVALUATION_COMPLETE}
+
+IFS=',' read -r -a MODELS <<<"$MODELS_CSV"
+if [[ "${#MODELS[@]}" -eq 0 ]]; then
+  echo "MODELS_CSV must contain at least one model." >&2
+  exit 2
+fi
+for model in "${MODELS[@]}"; do
+  case "$model" in
+    qwen3.8-flash|qwen3.8-max) ;;
+    *)
+      echo "Unsupported model in MODELS_CSV: $model" >&2
+      exit 2
+      ;;
+  esac
+done
 
 cd "$REPO_DIR"
 mkdir -p "$JUDGE_STATE_DIR"
@@ -22,17 +40,19 @@ if [[ -f infra/runpod.env ]]; then
 fi
 : "${RUNPOD_API_KEY:?RUNPOD_API_KEY is required through gitignored infra/runpod.env}"
 
+umask 077
+runpod_curl_config="$JUDGE_STATE_DIR/runpod-curl.conf"
+printf 'header = "Authorization: Bearer %s"\n' "$RUNPOD_API_KEY" >"$runpod_curl_config"
+
 API=https://rest.runpod.io/v1
 rp() {
   local method=$1 path=$2 body=${3:-}
   if [[ -n "$body" ]]; then
-    curl -fsS -X "$method" "$API$path" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY" \
+    curl -fsS --config "$runpod_curl_config" -X "$method" "$API$path" \
       -H 'Content-Type: application/json' \
       -d "$body"
   else
-    curl -fsS -X "$method" "$API$path" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY"
+    curl -fsS --config "$runpod_curl_config" -X "$method" "$API$path"
   fi
 }
 
@@ -42,6 +62,8 @@ if [[ ! -s "$token_path" ]]; then
   openssl rand -hex 32 >"$token_path"
 fi
 judge_api_key=$(<"$token_path")
+judge_curl_config="$JUDGE_STATE_DIR/judge-curl.conf"
+printf 'header = "Authorization: Bearer %s"\n' "$judge_api_key" >"$judge_curl_config"
 
 pod_id=""
 if [[ -s "$JUDGE_STATE_DIR/pod-id" ]]; then
@@ -63,12 +85,13 @@ trap 'exit 130' INT TERM
 
 if [[ -z "$pod_id" ]]; then
   body=$(JUDGE_API_KEY="$judge_api_key" VLLM_IMAGE="$VLLM_IMAGE" \
+    POD_NAME="$POD_NAME" \
     JUDGE_MODEL_REVISION="$JUDGE_MODEL_REVISION" "$PYTHON_BIN" - <<'PY'
 import json
 import os
 
 print(json.dumps({
-    "name": "perceptionbench-gpt-oss-120b-judge",
+    "name": os.environ["POD_NAME"],
     "imageName": os.environ["VLLM_IMAGE"],
     "cloudType": "SECURE",
     "computeType": "GPU",
@@ -128,8 +151,7 @@ judge_base_url="https://$pod_id-8000.proxy.runpod.net/v1"
 echo "[$(date -u +%FT%TZ)] waiting for the pinned judge server"
 ready=0
 for _ in $(seq 1 180); do
-  if curl -fsS --max-time 15 \
-    -H "Authorization: Bearer $judge_api_key" \
+  if curl -fsS --config "$judge_curl_config" --max-time 15 \
     "$judge_base_url/models" \
     | jq -e --arg model "$JUDGE_MODEL" '.data[] | select(.id == $model)' >/dev/null 2>&1; then
     ready=1
@@ -145,7 +167,7 @@ fi
 export PERCEPTIONBENCH_JUDGE_API_KEY="$judge_api_key"
 export PERCEPTIONBENCH_JUDGE_BASE_URL="$judge_base_url"
 
-for model in qwen3.8-flash qwen3.8-max; do
+for model in "${MODELS[@]}"; do
   run_dir="$RUN_ROOT/$model-xhigh-v1"
   echo "[$(date -u +%FT%TZ)] judging $model with the paper's exact judge"
   "$PYTHON_BIN" evaluate_qwen38_perceptionbench.py judge \
@@ -172,5 +194,5 @@ for model in qwen3.8-flash qwen3.8-max; do
     --data-dir "$DATA_DIR" --run-dir "$run_dir"
 done
 
-touch "$RUN_ROOT/_QWEN38_MAX_FLASH_EVALUATION_COMPLETE"
-echo "[$(date -u +%FT%TZ)] both paper-matched evaluations are complete"
+touch "$RUN_ROOT/$COMPLETION_MARKER"
+echo "[$(date -u +%FT%TZ)] paper-matched evaluations are complete for: $MODELS_CSV"
